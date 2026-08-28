@@ -1,7 +1,7 @@
 {
   "name": "pi-infinite-context",
   "version": "0.1.0",
-  "description": "Let the pi agent edit its own LLM context: reversibly fold finished or bulky message ranges into stubs, and recover them.",
+  "description": "Let the pi agent edit its own LLM context: reversibly fold finished or bulky message ranges into stubs, and unfold them on demand.",
   "keywords": ["pi-package"],
   "license": "MIT",
   "author": "fdietze",

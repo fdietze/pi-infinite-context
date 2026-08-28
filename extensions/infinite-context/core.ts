@@ -6,12 +6,12 @@
  * (core.test.ts). The imperative shell (index.ts) wires pi events/tools and
  * calls into here.
  *
- * ONE mechanism: every forget is a `Span` (a range snapped to whole tool units)
- * with an optional summary. A span with a single member and an empty summary is
- * the former "tombstone" (content gone, stub remains). Because spans always
- * cover whole toolCall/toolResult units (expandRange), replacing them with a
+ * ONE mechanism: every fold is a `Span` (a range snapped to whole tool units)
+ * with an optional summary. A span with an empty summary is a bare fold: its
+ * content remains stored while only the stub is active. Because spans always
+ * cover whole toolCall/toolResult units (snapRangeToUnits), replacing them with a
  * single synthetic user message can never orphan a pair. Everything is fully
- * reversible (remember).
+ * reversible (unfold).
  */
 
 // Custom-entry type for the persisted span list.
@@ -109,10 +109,9 @@ export interface BranchEntry {
 export type BranchMsg = { id: string; message: AgentMessageLike };
 
 // A folded range, addressed by fromId (= first member) in tool results
-// (map/search/peek/collapse); the stub itself carries no inline id. memberIds
+// (map/search/peek/fold); the stub itself carries no inline id. memberIds
 // are always real entry ids (flat), contiguous and ascending in branch order.
-// summary == "" -> the range is only dropped (stub "(forgotten N)"), otherwise
-// it is replaced by the summary.
+// summary == "" -> a bare "(folded N)" stub; otherwise the summary is visible.
 export interface Span {
   fromId: string;
   memberIds: string[];
@@ -301,7 +300,7 @@ export function unitBounds(msgs: BranchMsg[]): {
  * First snap lo/hi to whole tool units, then flatly absorb overlapping spans
  * (fully include their members). Repeat until stable.
  */
-export function expandRange(
+export function snapRangeToUnits(
   msgs: BranchMsg[],
   bounds: { start: number[]; end: number[] },
   spans: Span[],
@@ -345,37 +344,37 @@ export function expandRange(
   return { lo, hi };
 }
 
-export interface CollapseItem {
+export interface FoldItem {
   from: string;
   to?: string;
   summary?: string;
 }
 
-export interface CollapsePlan {
+export interface FoldPlan {
   spans: Span[]; // new span state (the input is left unchanged)
   applied: string[]; // fromIds of the resulting stubs (deduplicated)
   summaries: string[]; // summary per applied stub
-  collapsed: number; // distinct collapsed messages
+  folded: number; // distinct folded messages
   unknown: string[]; // ids that could not be resolved
   freedTokens: number; // net context tokens freed (live members - new stubs)
 }
 
 // Stub text carries NO inline [#id]: ids exist only in tool results (map/
-// search/peek/collapse), one uniform rule. The id-less stub costs one
-// context_map call in the rare "expand the fold I'm looking at" case, and buys
+// search/peek/fold), one uniform rule. The id-less stub costs one context_map
+// call in the rare "unfold the fold I'm looking at" case, and buys
 // zero first-token imitation surface plus a few tokens per fold per request
 // (same trade that removed live-message prefixes, see index.ts header).
 function stubText(summary: string, n: number, hidden: number): string {
   const h = fmtTokens(hidden);
   return summary
     ? `(summary, ${h} hidden) ${summary}`
-    : `(forgotten ${n} message${n > 1 ? "s" : ""}, ${h} hidden)`;
+    : `(folded ${n} message${n > 1 ? "s" : ""}, ${h} hidden)`;
 }
 
 /**
  * Token cost of a span's stub message, exactly as buildOverlay renders it,
  * measured with the same estimator as every other count. Single source (DRY)
- * for the freed/restored net-token math in planCollapse and planExpand.
+ * for the freed/restored net-token math in planFold and planUnfold.
  */
 export function stubTokens(summary: string, n: number, hidden: number): number {
   return estimateTokens({
@@ -385,18 +384,18 @@ export function stubTokens(summary: string, n: number, hidden: number): number {
 }
 
 /**
- * Pure forget planning. Returns the new span state + report without mutating
+ * Pure fold planning. Returns the new span state + report without mutating
  * the input. Multiple items that snap to the same tool unit (e.g. parallel tool
  * calls in ONE assistant turn) merge into one stub; non-empty summaries are
  * kept (an empty one never overwrites a real one). The report is derived from
  * the final state -> deduplicated and counted correctly no matter how many
  * items coincided.
  */
-export function planCollapse(
+export function planFold(
   msgs: BranchMsg[],
   spans: Span[],
-  items: CollapseItem[],
-): CollapsePlan {
+  items: FoldItem[],
+): FoldPlan {
   const next: Span[] = spans.map((s) => ({
     ...s,
     memberIds: s.memberIds.slice(),
@@ -427,7 +426,7 @@ export function planCollapse(
     if (a === undefined) unknown.push(item.from);
     if (b === undefined && toId !== item.from) unknown.push(toId);
     if (a === undefined || b === undefined) continue;
-    const { lo, hi } = expandRange(
+    const { lo, hi } = snapRangeToUnits(
       msgs,
       bounds,
       next,
@@ -469,18 +468,18 @@ export function planCollapse(
     spans: next,
     applied: resultSpans.map((s) => s.fromId),
     summaries: resultSpans.map((s) => s.summary),
-    collapsed: touched.size,
+    folded: touched.size,
     unknown,
     freedTokens,
   };
 }
 
-export interface ExpandItem {
+export interface UnfoldItem {
   from: string;
   to?: string;
 }
 
-export interface ExpandPlan {
+export interface UnfoldPlan {
   spans: Span[];
   applied: string[]; // fromId of each restored sub-range
   noop: string[]; // ids matching no span
@@ -490,19 +489,19 @@ export interface ExpandPlan {
 }
 
 /**
- * Pure expand planning (inverse of collapse). Range-aware: an item is matched to
+ * Pure unfold planning (inverse of fold). Range-aware: an item is matched to
  * the fold containing `from` (its stub fromId, or any inner member id revealed
- * by search/peek). Uniform rule: omit `to` -> expand the WHOLE fold; give `to`
+ * by search/peek). Uniform rule: omit `to` -> unfold the WHOLE fold; give `to`
  * -> the from..to sub-range SPLITS the fold - the sub-range is restored live,
  * the two leftover halves stay folded, both inheriting the original summary
  * (lossless). The sub-range is snapped to whole tool units and clamped within
  * the fold, so remnants never orphan a tool call/result pair.
  */
-export function planExpand(
+export function planUnfold(
   msgs: BranchMsg[],
   spans: Span[],
-  items: ExpandItem[],
-): ExpandPlan {
+  items: UnfoldItem[],
+): UnfoldPlan {
   const next: Span[] = spans.map((s) => ({
     ...s,
     memberIds: s.memberIds.slice(),
@@ -606,7 +605,7 @@ export function planExpand(
 /**
  * Drop span members that are no longer part of the active context (pi's native
  * compaction summarized them away). A fold over vanished messages would
- * otherwise show phantom savings and an unexpandable stub — the stub stays only
+ * otherwise show phantom savings and a stub that cannot be unfolded — the stub stays only
  * for members that still exist, keyed to the first surviving member.
  */
 export function reconcileSpans(
@@ -631,7 +630,7 @@ export function reconcileSpans(
 
 /**
  * Overview of the fold tree: totals + one line per span (branch order). Used by
- * peek() and the collapse/expand result tails.
+ * peek() and the fold/unfold result tails.
  */
 export function summarizeTree(
   spans: Span[],
@@ -697,7 +696,7 @@ export interface SearchHit {
  * Case-insensitive substring search across ALL taggable messages (live and
  * folded) AND every fold's summary digest, flagging which fold (if any) hides
  * each hit. The find-by-content complement to peek's look-by-id: locate a
- * keyword, then peek/expand the hit. A fold whose *summary* matches is returned
+ * keyword, then peek/unfold the hit. A fold whose *summary* matches is returned
  * as its own hit (role "fold", id = the fold's stub) - the digest is curated to
  * be findable, so it must be searchable even though it is not a stored message.
  */
@@ -772,7 +771,7 @@ export interface MapRow {
 /**
  * Whole-context map for context_map: one row per live message and one per fold,
  * in conversation order. The orientation view the model reads to pick ranges for
- * a batch collapse — complements searchMessages (find-by-content) with
+ * a batch fold — complements searchMessages (find-by-content) with
  * find-by-position. Pure and tested in isolation.
  */
 export function buildContextMap(
@@ -824,7 +823,7 @@ export function buildContextMap(
 }
 
 /**
- * Build the context overlay: replace forgotten ranges with a stub, and pass
+ * Build the context overlay: replace folded ranges with a stub, and pass
  * every live message through UNTOUCHED. Live messages are not prefixed; the
  * model reads their ids from context_map/_search/_peek. Untouched live messages
  * keep the provider's native prefix cache intact (no per-call mutation).

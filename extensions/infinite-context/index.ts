@@ -4,8 +4,8 @@
  * Idea: the agent references messages by id via five context_ tools. Ids are
  * NOT prefixed onto live messages; the agent learns them from context_map
  * (whole-context orientation list: id + role + tokens + snippet + fold state)
- * and from context_search/context_peek. context_collapse (fold a range, with an
- * optional summary) and context_expand (restore a fold or a sub-range, which
+ * and from context_search/context_peek. context_fold (fold a range, with an
+ * optional summary) and context_unfold (restore a fold or a sub-range, which
  * splits it) are the mutators; context_map, context_peek (read folds' contents)
  * and context_search (find by keyword) are the reads. Nothing in the overlay
  * carries an inline `[#id]` — not even fold stubs: ids exist only in tool
@@ -16,9 +16,9 @@
  * tokens on every message every call, for ids the map already exposes. Dropping
  * them removes the imitation-defense machinery and keeps live messages byte-
  * identical across calls (native prompt cache intact). Fold stubs followed for
- * the same reasons: the id was readable inline only in the rare "expand what
+ * the same reasons: the id was readable inline only in the rare "unfold what
  * I'm looking at" case, which now costs one context_map call — and
- * context_collapse's own result already printed the fold id anyway.
+ * context_fold's own result already printed the fold id anyway.
  *
  * Why the id lookup needs the session entries: the provider serializes only
  * `role` + `content`; extra fields on the message object never reach the model,
@@ -28,7 +28,7 @@
  *
  * Why buildContextEntries() and not getBranch(): after pi's native compaction
  * the raw branch still contains messages the model no longer sees. The tools
- * must describe the ACTIVE context (map/search/collapse over what is actually
+ * must describe the ACTIVE context (map/search/fold over what is actually
  * sent), so they read buildContextEntries() — compaction applied, summaries
  * included. Spans referencing compacted-away members are reconciled lazily
  * (reconcileSpans) so folds never report phantom savings. Only the persisted
@@ -66,8 +66,8 @@ import {
   type MapRow,
   buildOverlay,
   fmtTokens,
-  planCollapse,
-  planExpand,
+  planFold,
+  planUnfold,
   planNudge,
   type SearchHit,
   reconcileSpans,
@@ -99,8 +99,8 @@ function overviewTail(spans: Span[], msgs: BranchMsg[]): string {
 
 // Projected context fill after a mutation. getContextUsage().tokens reflects the
 // LAST assistant usage (agent-session.js), so a just-made fold only shows on the
-// next call. Project it from last + the net token delta (collapse: negative,
-// expand: positive) so the reported numbers reconcile in place. Empty when the
+// next call. Project it from last + the net token delta (fold: negative,
+// unfold: positive) so the reported numbers reconcile in place. Empty when the
 // last usage is unknown (e.g. right after compaction).
 function projectedCtx(
   usage: { contextWindow: number; tokens: number | null } | undefined,
@@ -114,35 +114,36 @@ function projectedCtx(
 }
 
 // Signed percentage of the context window; sign derived from the value (never a
-// hardcoded prefix), so a non-saving collapse can't print a double minus.
+// hardcoded prefix), so a non-saving fold can't print a double minus.
 function pctOf(deltaTokens: number, contextWindow: number): string {
   if (contextWindow <= 0) return "";
   const p = (deltaTokens / contextWindow) * 100;
   return ` (${p >= 0 ? "+" : "−"}${Math.abs(p).toFixed(1)}%)`;
 }
 
-// Shared TUI detail for the two inverse mutators (collapse/expand).
+// Shared TUI detail for the two inverse mutators (fold/unfold).
 interface MutateDetails {
-  action: "collapse" | "expand";
+  action: "fold" | "unfold";
   ok: boolean; // applied something
-  msgs: number; // messages collapsed / restored
-  deltaTokens: number; // freed (collapse) / restored (expand)
+  msgs: number; // messages folded / restored
+  deltaTokens: number; // freed (fold) / restored (unfold)
   tail: string; // standing state line (folds · hidden · ctx)
-  summaries: string[]; // collapse digests (empty for expand)
+  summaries: string[]; // fold digests (empty for unfold)
   failed: string[]; // unresolved ids
   failLabel: string; // "unknown" | "not folded"
 }
 
-// One renderer for both mutators: terse action line when collapsed; standing
-// state + digests/failures when expanded. Symmetric glyphs ⊟ (fold) / ⊞ (unfold).
+// One renderer for both mutators: the host TUI shows a terse action line in its
+// compact view, then standing state + digests/failures when the host API
+// requests details (`opts.expanded`). Symmetric glyphs ⊟ (fold) / ⊞ (unfold).
 function renderMutate(
   d: MutateDetails,
   opts: ToolRenderResultOptions,
   theme: Theme,
 ): Text {
-  const fold = d.action === "collapse";
+  const fold = d.action === "fold";
   const glyph = fold ? "⊟" : "⊞";
-  const past = fold ? "collapsed" : "expanded";
+  const past = fold ? "folded" : "unfolded";
   const verb = fold ? "freed" : "restored";
   const color: ThemeColor = d.ok ? "success" : "warning";
   const head = d.ok
@@ -215,7 +216,7 @@ export default function (pi: ExtensionAPI) {
         customType: "infinite-context/nudge",
         content:
           `<context-maintenance>\nContext is ~${Math.round(percent)}% full. ` +
-          `Before continuing, run context_map, then batch a context_collapse ` +
+          `Before continuing, run context_map, then batch a context_fold ` +
           `of completed or superseded material. Preserve the active request, ` +
           `open loops, unresolved errors, and evidence you still need. ` +
           `A no-op is valid if nothing is safe to fold.\n</context-maintenance>`,
@@ -226,7 +227,7 @@ export default function (pi: ExtensionAPI) {
     );
   });
 
-  // Replace forgotten ranges with a stub; live messages pass through untouched.
+  // Replace folded ranges with a stub; live messages pass through untouched.
   pi.on("context", async (event, ctx) => {
     const messages = buildOverlay(
       event.messages as AgentMessageLike[],
@@ -288,9 +289,9 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // --- collapse ------------------------------------------------------------
+  // --- fold ----------------------------------------------------------------
 
-  const CollapseParam = Type.Object({
+  const FoldParam = Type.Object({
     items: Type.Array(
       Type.Object({
         from: Type.String({
@@ -318,36 +319,36 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "context_collapse",
-    label: "Context collapse",
+    name: "context_fold",
+    label: "Context fold",
     description:
       "Replace inclusive message ranges with reversible fold stubs. A supplied summary stays visible in the stub; " +
-      "hidden messages remain available to context_search, context_peek, and context_expand. If a range touches an " +
+      "hidden messages remain available to context_search, context_peek, and context_unfold. If a range touches an " +
       "assistant turn that made tool calls, the whole turn and all its tool results fold together. Existing folds " +
       "touched by a range are absorbed whole, joining their summaries.",
     promptSnippet:
-      "Reversibly fold completed conversation history; use context_map for ids and context_search/context_peek/context_expand to recover it",
+      "Reversibly fold completed conversation history; use context_map for ids and context_search/context_peek/context_unfold to recover it",
     promptGuidelines: [
-      "Use context_collapse on your own, without being asked, whenever completed material bloats your active context — typically after finishing an exploration, debugging, implementation, or verification phase, and after several large tool results. Good candidates: digested file reads and logs, redundant re-reads, superseded plans and old file versions, completed steps, and dead ends. Collapse before the context limit forces coarser auto-compaction.",
-      "Do not collapse governing instructions (loaded skills, AGENTS.md), the active request, unresolved errors, open decisions, or anything needed verbatim soon. Collapse only when the stub or summary is materially smaller than what it hides.",
-      "In a context_collapse summary, keep only what is likely to matter later: open loops, current state (paths, symbols, passing tests), decisions with rejected options, and gotchas. For a dead end, one line: 'tried X, failed because Y'. Drop narration and raw output. Omit the summary entirely when nothing is worth keeping.",
-      "Use context_map to pick ranges and batch independent ranges into one context_collapse call. To recover folded detail: context_search to locate, context_peek to read in place, context_expand only when messages must return to the active context.",
+      "Use context_fold on your own, without being asked, whenever completed material bloats your active context — typically after finishing an exploration, debugging, implementation, or verification phase, and after several large tool results. Good candidates: digested file reads and logs, redundant re-reads, superseded plans and old file versions, completed steps, and dead ends. Fold before the context limit forces coarser auto-compaction.",
+      "Do not fold governing instructions (loaded skills, AGENTS.md), the active request, unresolved errors, open decisions, or anything needed verbatim soon. Fold only when the stub or summary is materially smaller than what it hides.",
+      "In a context_fold summary, keep only what is likely to matter later: open loops, current state (paths, symbols, passing tests), decisions with rejected options, and gotchas. For a dead end, one line: 'tried X, failed because Y'. Drop narration and raw output. Omit the summary entirely when nothing is worth keeping.",
+      "Use context_map to pick ranges and batch independent ranges into one context_fold call. To recover folded detail: context_search to locate, context_peek to read in place, context_unfold only when messages must return to the active context.",
     ],
-    parameters: CollapseParam,
+    parameters: FoldParam,
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const msgs = reconcile(activeMsgs(ctx));
-      const plan = planCollapse(msgs, spans, params.items);
+      const plan = planFold(msgs, spans, params.items);
       spans = plan.spans;
-      if (plan.collapsed) persist();
+      if (plan.folded) persist();
       const usage = ctx.getContextUsage();
       const win = usage?.contextWindow ?? 0;
       const tail = overviewTail(spans, msgs);
-      // Collapse lowers live tokens -> delta is negative; freedTokens is the
+      // Fold lowers live tokens -> delta is negative; freedTokens is the
       // positive magnitude. freedTokens <= 0 means the stub/summary is as big as
       // the hidden content: the fold still applied, but there is no net saving.
       const saved = plan.freedTokens > 0;
       const head = plan.applied.length
-        ? `+ collapsed ${plural(plan.collapsed, "msg")} into ${plural(plan.applied.length, "fold")}: ${plan.applied.join(", ")}, ` +
+        ? `+ folded ${plural(plan.folded, "msg")} into ${plural(plan.applied.length, "fold")}: ${plan.applied.join(", ")}, ` +
           (saved
             ? `freed ${fmtTokens(plan.freedTokens)}${pctOf(-plan.freedTokens, win)}`
             : "no net saving (stub/summary ≥ hidden content)") +
@@ -355,13 +356,13 @@ export default function (pi: ExtensionAPI) {
           (plan.unknown.length
             ? `. unknown id(s): ${plan.unknown.join(", ")}`
             : "")
-        : `Collapsed nothing. unknown id(s): ${plan.unknown.join(", ")}`;
+        : `Folded nothing. unknown id(s): ${plan.unknown.join(", ")}`;
       return {
         content: [{ type: "text", text: `${head}\n${tail}` }],
         details: {
-          action: "collapse",
+          action: "fold",
           ok: plan.applied.length > 0,
-          msgs: plan.collapsed,
+          msgs: plan.folded,
           deltaTokens: plan.freedTokens,
           tail,
           summaries: plan.summaries.filter((s) => s),
@@ -376,9 +377,9 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // --- expand --------------------------------------------------------------
+  // --- unfold --------------------------------------------------------------
 
-  const ExpandParam = Type.Object({
+  const UnfoldParam = Type.Object({
     items: Type.Array(
       Type.Object({
         from: Type.String({
@@ -400,31 +401,31 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
-    name: "context_expand",
-    label: "Context expand",
+    name: "context_unfold",
+    label: "Context unfold",
     description:
-      "Restore folded messages — inverse of context_collapse. Restores a whole fold, or the from..to sub-range, " +
+      "Restore folded messages — inverse of context_fold. Restores a whole fold, or the from..to sub-range, " +
       "which splits the fold and leaves up to two remainder folds, each carrying the original summary. Assistant " +
       "turns with tool calls move together with all their tool results. To only read folded content, use " +
       "context_peek instead.",
-    parameters: ExpandParam,
+    parameters: UnfoldParam,
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const msgs = reconcile(activeMsgs(ctx));
-      const plan = planExpand(msgs, spans, params.items);
+      const plan = planUnfold(msgs, spans, params.items);
       spans = plan.spans;
       if (plan.applied.length) persist();
       const usage = ctx.getContextUsage();
       const win = usage?.contextWindow ?? 0;
       const tail = overviewTail(spans, msgs);
-      // Expand raises live tokens -> delta is positive (net: members + remnant
+      // Unfold raises live tokens -> delta is positive (net: members + remnant
       // stubs − removed stub).
       // Cross-fold ranges are rejected rather than clamped, so they are reported
       // separately from ids that simply are not folded.
       const failed = [...plan.noop, ...plan.invalid];
       const head =
         (plan.applied.length
-          ? `− expanded ${plural(plan.restoredMsgs, "msg")}: ${plan.applied.join(", ")}, restored ${fmtTokens(plan.restoredTokens)}${pctOf(plan.restoredTokens, win)}${projectedCtx(usage, plan.restoredTokens)}`
-          : "Expanded nothing") +
+          ? `− unfolded ${plural(plan.restoredMsgs, "msg")}: ${plan.applied.join(", ")}, restored ${fmtTokens(plan.restoredTokens)}${pctOf(plan.restoredTokens, win)}${projectedCtx(usage, plan.restoredTokens)}`
+          : "Unfolded nothing") +
         (plan.noop.length ? `. not folded: ${plan.noop.join(", ")}` : "") +
         (plan.invalid.length
           ? `. \`to\` outside \`from\`'s fold: ${plan.invalid.join(", ")}`
@@ -432,7 +433,7 @@ export default function (pi: ExtensionAPI) {
       return {
         content: [{ type: "text", text: `${head}\n${tail}` }],
         details: {
-          action: "expand",
+          action: "unfold",
           ok: plan.applied.length > 0,
           msgs: plan.restoredMsgs,
           deltaTokens: plan.restoredTokens,

@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="700" height="200" viewBox="0 0 700 200" role="img" aria-labelledby="title description">
+  <title id="title">How folding preserves chat history</title>
+  <desc id="description">A selected range remains in stored history while active context replaces it with a summary.</desc>
+
+  <!-- KISS and YAGNI: fixed SVG primitives keep the README graphic compact and dependency-free. -->
+  <!-- The Map Is Not the Territory: active context is a derived view while stored history remains intact. -->
+  <style>
+    text {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+
+    .rail-label {
+      fill: #1f2328;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .node-label {
+      fill: #1f2328;
+      font-size: 12px;
+      font-weight: 500;
+      text-anchor: middle;
+    }
+
+    .annotation {
+      fill: #59636e;
+      font-size: 11px;
+      text-anchor: middle;
+    }
+
+    .track {
+      stroke: #8c959f;
+      stroke-width: 1.5;
+    }
+
+    .node {
+      stroke-width: 1.5;
+    }
+
+    .user {
+      fill: #eaf2ff;
+      stroke: #6688cc;
+    }
+
+    .assistant {
+      fill: #f3f4f6;
+      stroke: #8b95a5;
+    }
+
+    .tool {
+      fill: #fff3d6;
+      stroke: #c28a2c;
+    }
+
+    .summary {
+      fill: #e4f5ed;
+      stroke: #3d8f6b;
+    }
+
+    .selection {
+      fill: none;
+      stroke: #3d8f6b;
+      stroke-width: 2;
+    }
+
+    .fold-arrow {
+      fill: none;
+      stroke: #3d8f6b;
+      stroke-width: 2;
+      marker-end: url(#arrowhead);
+    }
+
+    .arrowhead {
+      fill: #3d8f6b;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      .rail-label,
+      .node-label { fill: #f0f6fc; }
+      .annotation { fill: #8c959f; }
+      .track { stroke: #6e7681; }
+      .user { fill: #202d48; stroke: #7f9edb; }
+      .assistant { fill: #262a31; stroke: #8993a3; }
+      .tool { fill: #3a2e1c; stroke: #d5a64e; }
+      .summary { fill: #19382f; stroke: #62b38f; }
+      .selection,
+      .fold-arrow { stroke: #62b38f; }
+      .arrowhead { fill: #62b38f; }
+    }
+  </style>
+
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path class="arrowhead" d="M 0 0 L 8 4 L 0 8 Z"/>
+    </marker>
+  </defs>
+
+  <text class="rail-label" x="14" y="61">Stored history</text>
+  <line class="track" x1="120" y1="56" x2="674" y2="56"/>
+
+  <rect class="node user" x="128" y="39" width="78" height="34" rx="4"/>
+  <text class="node-label" x="167" y="61">User</text>
+
+  <rect class="node assistant" x="220" y="39" width="78" height="34" rx="4"/>
+  <text class="node-label" x="259" y="61">Assistant</text>
+
+  <rect class="node tool" x="312" y="39" width="78" height="34" rx="4"/>
+  <text class="node-label" x="351" y="61">Tool</text>
+
+  <rect class="node assistant" x="404" y="39" width="78" height="34" rx="4"/>
+  <text class="node-label" x="443" y="61">Assistant</text>
+
+  <rect class="node user" x="496" y="39" width="78" height="34" rx="4"/>
+  <text class="node-label" x="535" y="61">User</text>
+
+  <rect class="node assistant" x="588" y="39" width="78" height="34" rx="4"/>
+  <text class="node-label" x="627" y="61">Assistant</text>
+
+  <text class="annotation" x="443" y="23">selected range</text>
+  <rect class="selection" x="306" y="31" width="274" height="50" rx="6"/>
+  <path class="fold-arrow" d="M 443 84 L 443 143"/>
+  <text class="annotation" x="463" y="118">fold</text>
+
+  <text class="rail-label" x="14" y="170">Active context</text>
+  <line class="track" x1="120" y1="165" x2="674" y2="165"/>
+
+  <rect class="node user" x="128" y="148" width="78" height="34" rx="4"/>
+  <text class="node-label" x="167" y="170">User</text>
+
+  <rect class="node assistant" x="220" y="148" width="78" height="34" rx="4"/>
+  <text class="node-label" x="259" y="170">Assistant</text>
+
+  <rect class="node summary" x="312" y="148" width="262" height="34" rx="4"/>
+  <text class="node-label" x="443" y="170">Summary of 3 events</text>
+
+  <rect class="node assistant" x="588" y="148" width="78" height="34" rx="4"/>
+  <text class="node-label" x="627" y="170">Assistant</text>
+</svg>

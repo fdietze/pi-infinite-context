@@ -9,8 +9,8 @@ import {
   buildOverlay,
   estimateTokens,
   fmtTokens,
-  planCollapse,
-  planExpand,
+  planFold,
+  planUnfold,
   planNudge,
   reconcileSpans,
   reconstructSpans,
@@ -125,11 +125,11 @@ test("unitBounds groups parallel tool calls of one assistant turn into one unit"
   assert.deepEqual(end, [0, 4, 4, 4, 4, 5]);
 });
 
-// --- planCollapse ----------------------------------------------------------
+// --- planFold --------------------------------------------------------------
 
-test("planCollapse: two items hitting the same tool unit merge into ONE stub, keep the non-empty summary, count distinct", () => {
+test("planFold: two items hitting the same tool unit merge into ONE stub, keep the non-empty summary, count distinct", () => {
   const msgs = branchMessages(batchedReadBranch());
-  const plan = planCollapse(msgs, [], [
+  const plan = planFold(msgs, [], [
     { from: "R1", summary: "f01 done" },
     { from: "R2" },
   ]);
@@ -138,38 +138,38 @@ test("planCollapse: two items hitting the same tool unit merge into ONE stub, ke
   assert.equal(plan.spans[0].fromId, "A");
   assert.equal(plan.spans[0].summary, "f01 done");
   assert.deepEqual(plan.applied, ["A"]);
-  assert.equal(plan.collapsed, 4);
+  assert.equal(plan.folded, 4);
   assert.deepEqual(plan.summaries, ["f01 done"]);
 });
 
-test("planCollapse: freedTokens > 0 for a fresh fold, and excludes already-folded members", () => {
+test("planFold: freedTokens > 0 for a fresh fold, and excludes already-folded members", () => {
   const msgs = branchMessages(batchedReadBranch());
-  const first = planCollapse(msgs, [], [{ from: "R1" }]);
+  const first = planFold(msgs, [], [{ from: "R1" }]);
   assert.ok(first.freedTokens > 0, "fresh fold frees tokens");
-  // re-collapsing the identical (already folded) range frees no new live tokens
-  const second = planCollapse(msgs, first.spans, [{ from: "R1" }]);
+  // Re-folding an already folded range frees no new live tokens.
+  const second = planFold(msgs, first.spans, [{ from: "R1" }]);
   assert.ok(second.freedTokens <= 0, "no double-counting already-folded members");
 });
 
-test("planCollapse: single standalone message -> single-member span", () => {
-  const plan = planCollapse(branchMessages(fiveUserBranch()), [], [{ from: "u2" }]);
+test("planFold: single standalone message -> single-member span", () => {
+  const plan = planFold(branchMessages(fiveUserBranch()), [], [{ from: "u2" }]);
   assert.equal(plan.spans.length, 1);
   assert.deepEqual(plan.spans[0].memberIds, ["u2"]);
   assert.equal(plan.spans[0].summary, "");
-  assert.equal(plan.collapsed, 1);
+  assert.equal(plan.folded, 1);
 });
 
-test("planCollapse: unknown ids reported, not applied", () => {
+test("planFold: unknown ids reported, not applied", () => {
   const msgs = branchMessages(batchedReadBranch());
-  const plan = planCollapse(msgs, [], [{ from: "nope" }, { from: "A2" }]);
+  const plan = planFold(msgs, [], [{ from: "nope" }, { from: "A2" }]);
   assert.deepEqual(plan.unknown, ["nope"]);
   assert.deepEqual(plan.applied, ["A2"]);
 });
 
-test("planCollapse: folding over an existing span absorbs it and inherits its summary", () => {
+test("planFold: folding over an existing span absorbs it and inherits its summary", () => {
   const msgs = branchMessages(fiveUserBranch());
-  const first = planCollapse(msgs, [], [{ from: "u5", summary: "kept" }]);
-  const second = planCollapse(msgs, first.spans, [
+  const first = planFold(msgs, [], [{ from: "u5", summary: "kept" }]);
+  const second = planFold(msgs, first.spans, [
     { from: "u1", to: "u5", summary: "outer" },
   ]);
   assert.equal(second.spans.length, 1);
@@ -177,36 +177,36 @@ test("planCollapse: folding over an existing span absorbs it and inherits its su
   assert.match(second.spans[0].summary, /outer/);
 });
 
-test("planCollapse: input spans are not mutated (pure)", () => {
+test("planFold: input spans are not mutated (pure)", () => {
   const msgs = branchMessages(batchedReadBranch());
   const input: Span[] = [];
-  const plan = planCollapse(msgs, input, [{ from: "A2", summary: "x" }]);
+  const plan = planFold(msgs, input, [{ from: "A2", summary: "x" }]);
   assert.equal(input.length, 0);
   assert.equal(plan.spans.length, 1);
 });
 
-// --- planExpand (range-aware, splits) --------------------------------------
+// --- planUnfold (range-aware, splits) --------------------------------------
 
-test("planExpand: bare span fromId expands the whole fold", () => {
+test("planUnfold: bare span fromId unfolds the whole fold", () => {
   const msgs = branchMessages(fiveUserBranch());
-  const folded = planCollapse(msgs, [], [{ from: "u1", to: "u5", summary: "s" }]);
-  const plan = planExpand(msgs, folded.spans, [{ from: "u1" }]);
+  const folded = planFold(msgs, [], [{ from: "u1", to: "u5", summary: "s" }]);
+  const plan = planUnfold(msgs, folded.spans, [{ from: "u1" }]);
   assert.equal(plan.spans.length, 0, "fold fully dissolved");
   assert.deepEqual(plan.applied, ["u1"]);
   assert.ok(plan.restoredTokens > 0);
 });
 
-test("planExpand: a bare inner member id (no `to`) also expands the WHOLE fold", () => {
+test("planUnfold: a bare inner member id (no `to`) also unfolds the WHOLE fold", () => {
   const msgs = branchMessages(fiveUserBranch());
-  const folded = planCollapse(msgs, [], [{ from: "u1", to: "u5", summary: "s" }]);
-  const plan = planExpand(msgs, folded.spans, [{ from: "u3" }]); // u3 is inner, not the stub id
-  assert.equal(plan.spans.length, 0, "whole fold expanded, not just u3");
+  const folded = planFold(msgs, [], [{ from: "u1", to: "u5", summary: "s" }]);
+  const plan = planUnfold(msgs, folded.spans, [{ from: "u3" }]); // u3 is inner, not the stub id
+  assert.equal(plan.spans.length, 0, "whole fold unfolded, not just u3");
 });
 
-test("planExpand: sub-range splits the fold into two remnants that inherit the summary", () => {
+test("planUnfold: sub-range splits the fold into two remnants that inherit the summary", () => {
   const msgs = branchMessages(fiveUserBranch());
-  const folded = planCollapse(msgs, [], [{ from: "u1", to: "u5", summary: "s" }]);
-  const plan = planExpand(msgs, folded.spans, [{ from: "u3", to: "u3" }]);
+  const folded = planFold(msgs, [], [{ from: "u1", to: "u5", summary: "s" }]);
+  const plan = planUnfold(msgs, folded.spans, [{ from: "u3", to: "u3" }]);
   assert.deepEqual(plan.applied, ["u3"]);
   assert.equal(plan.spans.length, 2);
   const byFrom = Object.fromEntries(plan.spans.map((s) => [s.fromId, s]));
@@ -227,11 +227,11 @@ test("planExpand: sub-range splits the fold into two remnants that inherit the s
   assert.equal(plan.restoredTokens, expected);
 });
 
-test("planExpand: sub-range snaps to whole tool units (no orphaned pair)", () => {
+test("planUnfold: sub-range snaps to whole tool units (no orphaned pair)", () => {
   const msgs = branchMessages(batchedReadBranch());
-  const folded = planCollapse(msgs, [], [{ from: "u1", to: "A2", summary: "s" }]);
-  // try to expand just R2 (inside the A..R3 unit) -> snaps to the whole unit
-  const plan = planExpand(msgs, folded.spans, [{ from: "R2", to: "R2" }]);
+  const folded = planFold(msgs, [], [{ from: "u1", to: "A2", summary: "s" }]);
+  // Trying to unfold just R2 (inside the A..R3 unit) snaps to the whole unit.
+  const plan = planUnfold(msgs, folded.spans, [{ from: "R2", to: "R2" }]);
   // the restored chunk must be the whole unit A,R1,R2,R3; remnants are u1 and A2
   const fromsRestoredUnit = plan.applied[0];
   assert.equal(fromsRestoredUnit, "A");
@@ -239,18 +239,18 @@ test("planExpand: sub-range snaps to whole tool units (no orphaned pair)", () =>
   assert.deepEqual(remnants, ["A2", "u1"]);
 });
 
-test("planExpand: id matching no span is a noop", () => {
+test("planUnfold: id matching no span is a noop", () => {
   const msgs = branchMessages(fiveUserBranch());
-  const folded = planCollapse(msgs, [], [{ from: "u1", to: "u2", summary: "s" }]);
-  const plan = planExpand(msgs, folded.spans, [{ from: "u5" }]);
+  const folded = planFold(msgs, [], [{ from: "u1", to: "u2", summary: "s" }]);
+  const plan = planUnfold(msgs, folded.spans, [{ from: "u5" }]);
   assert.deepEqual(plan.noop, ["u5"]);
   assert.equal(plan.spans.length, 1);
 });
 
-test("planExpand: rejects an end id outside the fold containing from", () => {
+test("planUnfold: rejects an end id outside the fold containing from", () => {
   const msgs = branchMessages(fiveUserBranch());
-  const folded = planCollapse(msgs, [], [{ from: "u1", to: "u2", summary: "s" }]);
-  const plan = planExpand(msgs, folded.spans, [{ from: "u1", to: "u5" }]);
+  const folded = planFold(msgs, [], [{ from: "u1", to: "u2", summary: "s" }]);
+  const plan = planUnfold(msgs, folded.spans, [{ from: "u1", to: "u5" }]);
   assert.deepEqual(plan.invalid, ["u1..u5"]);
   assert.deepEqual(plan.spans, folded.spans);
   assert.equal(plan.restoredMsgs, 0);
@@ -409,15 +409,15 @@ test("buildOverlay: a summarized span renders a stub with hidden cost and hides 
   assert.equal(out.length, 3);
   assert.equal(out[1].role, "user");
   // No inline [#id]: fold ids are visible only in tool results (map/search/
-  // peek/collapse), keeping the overlay free of imitation-prone markers.
+  // peek/fold), keeping the overlay free of imitation-prone markers.
   assert.match(out[1].content as string, /^\(summary, \S+ hidden\) read 3 files$/);
 });
 
-test("buildOverlay: empty-summary span renders a (forgotten N, X hidden) stub", () => {
+test("buildOverlay: empty-summary span renders a (folded N, X hidden) stub", () => {
   const branch = batchedReadBranch();
   const span: Span = { fromId: "A", memberIds: ["A", "R1", "R2", "R3"], summary: "" };
   const out = buildOverlay(messagesOf(branch), branchMessages(branch), [span]);
-  assert.match(out[1].content as string, /^\(forgotten 4 messages, \S+ hidden\)$/);
+  assert.match(out[1].content as string, /^\(folded 4 messages, \S+ hidden\)$/);
 });
 
 // --- buildContextMap -------------------------------------------------------
