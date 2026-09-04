@@ -77,6 +77,11 @@ import {
   summarizeTree,
 } from "./core.ts";
 
+// Ids appear as `[#id]` in tool output, so the model tends to echo the `#`
+// back. Strip one leading `#` at the tool boundary (parse, don't validate) so
+// `#5` and `5` resolve identically; core only ever sees bare ids.
+const bareId = (id: string) => id.replace(/^#/, "");
+
 // --- preview formatting helpers (TUI only) -------------------------------
 const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
 // All numeric sizes in this extension are TOKEN estimates (chars/4). The `tok`
@@ -337,7 +342,12 @@ export default function (pi: ExtensionAPI) {
     parameters: FoldParam,
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const msgs = reconcile(activeMsgs(ctx));
-      const plan = planFold(msgs, spans, params.items);
+      const items = params.items.map((it) => ({
+        ...it,
+        from: bareId(it.from),
+        to: it.to === undefined ? undefined : bareId(it.to),
+      }));
+      const plan = planFold(msgs, spans, items);
       spans = plan.spans;
       if (plan.folded) persist();
       const usage = ctx.getContextUsage();
@@ -411,7 +421,12 @@ export default function (pi: ExtensionAPI) {
     parameters: UnfoldParam,
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const msgs = reconcile(activeMsgs(ctx));
-      const plan = planUnfold(msgs, spans, params.items);
+      const items = params.items.map((it) => ({
+        ...it,
+        from: bareId(it.from),
+        to: it.to === undefined ? undefined : bareId(it.to),
+      }));
+      const plan = planUnfold(msgs, spans, items);
       spans = plan.spans;
       if (plan.applied.length) persist();
       const usage = ctx.getContextUsage();
@@ -478,7 +493,8 @@ export default function (pi: ExtensionAPI) {
       const blocks: string[] = [];
       const missing: string[] = [];
       let members = 0;
-      for (const id of params.ids) {
+      for (const rawId of params.ids) {
+        const id = bareId(rawId);
         const span = spans.find(
           (s) => s.fromId === id || s.memberIds.includes(id),
         );
