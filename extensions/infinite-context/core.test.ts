@@ -15,6 +15,7 @@ import {
   reconcileSpans,
   reconstructSpans,
   searchMessages,
+  compileSearchPattern,
   serializeSpan,
   stubTokens,
   summarizeTree,
@@ -290,44 +291,136 @@ test("serializeSpan: long content is truncated with a marker", () => {
   assert.match(out, /… \[\+3000 chars\]$/);
 });
 
-// --- searchMessages --------------------------------------------------------
+// --- searchMessages (regex grep, per line) ---------------------------------
 
-test("searchMessages: case-insensitive, flags folded hits with their fold fromId", () => {
-  const msgs = branchMessages(fiveUserBranch());
-  const spans: Span[] = [
-    { fromId: "u3", memberIds: ["u3", "u4"], summary: "" },
+// searchMessages takes a compiled pattern; tests state the pattern as source.
+const grep = (
+  msgs: Parameters<typeof searchMessages>[0],
+  spans: Span[],
+  pattern: string,
+  linesPerMessage?: number,
+  linesPerPattern?: number,
+) =>
+  searchMessages(
+    msgs,
+    spans,
+    compileSearchPattern(pattern),
+    linesPerMessage,
+    linesPerPattern,
+  );
+
+// A branch whose messages contain multiple lines, for line-level assertions.
+function multilineBranch(): BranchEntry[] {
+  ts = 0;
+  return [
+    userE("u1", "alpha one\nbeta two\ngamma three"),
+    userE("u2", "ALPHA shouting\nnothing here"),
   ];
-  const { hits, total } = searchMessages(msgs, spans, "THREE");
-  assert.equal(total, 1);
-  assert.equal(hits[0].id, "u3");
-  assert.equal(hits[0].foldFrom, "u3", "u3 is folded");
-  assert.match(hits[0].snippet, /three three three/);
-  // a live hit has foldFrom null
-  const live = searchMessages(msgs, spans, "two");
-  assert.equal(live.hits[0].id, "u2");
-  assert.equal(live.hits[0].foldFrom, null);
+}
+
+test("searchMessages: regex metacharacters match, case-insensitively", () => {
+  const msgs = branchMessages(multilineBranch());
+  const r = grep(msgs, [], "al.ha\\s+\\w+");
+  assert.equal(r.totalLines, 2);
+  assert.equal(r.totalMessages, 2);
+  assert.deepEqual(
+    r.hits.map((h) => [h.id, h.lines[0].line, h.lines[0].text]),
+    [
+      ["u1", 1, "alpha one"],
+      ["u2", 1, "ALPHA shouting"],
+    ],
+  );
 });
 
-test("searchMessages: a fold whose summary matches is returned as a 'fold' hit", () => {
-  const msgs = branchMessages(fiveUserBranch());
-  const spans: Span[] = [
-    { fromId: "u2", memberIds: ["u2", "u3"], summary: "the secret digest keyword" },
-  ];
-  const { hits, total } = searchMessages(msgs, spans, "digest keyword");
-  assert.equal(total, 1);
-  assert.equal(hits[0].id, "u2");
-  assert.equal(hits[0].role, "fold");
-  assert.equal(hits[0].foldFrom, null);
-  assert.match(hits[0].snippet, /digest keyword/);
+test("searchMessages: matching is per line, so `.` never spans a newline", () => {
+  const msgs = branchMessages(multilineBranch());
+  assert.equal(grep(msgs, [], "one.*beta").totalLines, 0);
+  assert.equal(grep(msgs, [], "one|beta").totalLines, 2);
 });
 
-test("searchMessages: empty query yields nothing; cap limits hits but total counts all", () => {
-  const msgs = branchMessages(fiveUserBranch());
-  assert.equal(searchMessages(msgs, [], "").total, 0);
-  // every fiveUserBranch message contains an 'o' or such? use a common letter
-  const r = searchMessages(msgs, [], "o", 1); // matches one/two/four...
-  assert.ok(r.total >= 2);
-  assert.equal(r.hits.length, 1, "cap respected");
+test("searchMessages: several lines of one message are reported with 1-based line numbers", () => {
+  const msgs = branchMessages(multilineBranch());
+  // `^` anchors per line without the `m` flag: each line is matched on its own.
+  const r = grep(msgs, [], "^(beta|gamma)");
+  assert.equal(r.hits.length, 1);
+  assert.deepEqual(r.hits[0].lines, [
+    { line: 2, text: "beta two" },
+    { line: 3, text: "gamma three" },
+  ]);
+  assert.equal(r.hits[0].moreLines, 0);
+  assert.equal(r.totalLines, 2);
+  assert.equal(r.totalMessages, 1);
+});
+
+test("searchMessages: a hit inside a fold carries its fold's fromId; a live hit carries null", () => {
+  const msgs = branchMessages(multilineBranch());
+  const spans: Span[] = [{ fromId: "u2", memberIds: ["u2"], summary: "" }];
+  const r = grep(msgs, spans, "alpha");
+  assert.deepEqual(
+    r.hits.map((h) => [h.id, h.foldFrom]),
+    [
+      ["u1", null],
+      ["u2", "u2"],
+    ],
+  );
+  assert.equal(r.foldedMessages, 1);
+});
+
+test("searchMessages: a matching summary is its own 'fold summary' hit, listed last", () => {
+  const msgs = branchMessages(multilineBranch());
+  const spans: Span[] = [
+    { fromId: "u1", memberIds: ["u1", "u2"], summary: "the secret digest" },
+  ];
+  const r = grep(msgs, spans, "secret|gamma");
+  assert.deepEqual(
+    r.hits.map((h) => [h.id, h.role, h.foldFrom]),
+    [
+      ["u1", "user", "u1"],
+      ["u1", "fold summary", null],
+    ],
+  );
+  assert.deepEqual(r.hits[1].lines, [{ line: 1, text: "the secret digest" }]);
+  // The summary hit is not "folded": it IS the fold, and it is always visible.
+  assert.equal(r.foldedMessages, 1);
+});
+
+test("searchMessages: per-message cap emits N lines + a remainder, totals stay true", () => {
+  ts = 0;
+  const msgs = branchMessages([userE("big", "hit\n".repeat(8).trim())]);
+  const r = grep(msgs, [], "hit", 5, 50);
+  assert.equal(r.hits[0].lines.length, 5);
+  assert.equal(r.hits[0].moreLines, 3);
+  assert.equal(r.totalLines, 8);
+  assert.equal(r.capped, false, "the per-pattern budget was not the limit");
+});
+
+test("searchMessages: per-pattern cap stops emission, counting continues", () => {
+  ts = 0;
+  const branch = [1, 2, 3].map((i) => userE(`m${i}`, "hit\nhit\nhit"));
+  const r = grep(branchMessages(branch), [], "hit", 5, 4);
+  assert.equal(
+    r.hits.reduce((n, h) => n + h.lines.length, 0),
+    4,
+    "emission stops at the per-pattern budget",
+  );
+  assert.equal(r.totalLines, 9);
+  assert.equal(r.totalMessages, 3, "silenced messages still count");
+  assert.equal(r.hits.length, 2, "the third message emits nothing");
+  assert.equal(r.capped, true);
+});
+
+test("searchMessages: a long line is windowed around its first match", () => {
+  ts = 0;
+  const line = `${"x".repeat(500)}needle${"y".repeat(500)}`;
+  const r = grep(branchMessages([userE("l", line)]), [], "needle");
+  const text = r.hits[0].lines[0].text;
+  assert.ok(text.includes("needle"));
+  assert.ok(text.startsWith("…") && text.endsWith("…"), "both ends truncated");
+  assert.ok(text.length <= 202, `windowed to ~200 chars, got ${text.length}`);
+});
+
+test("compileSearchPattern: an invalid pattern throws (the shell turns it into a tool error)", () => {
+  assert.throws(() => compileSearchPattern("("), SyntaxError);
 });
 
 // --- reconcileSpans / reconstructSpans -----------------------------------

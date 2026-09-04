@@ -7,7 +7,7 @@
  * and from context_search/context_peek. context_fold (fold a range, with an
  * optional summary) and context_unfold (restore a fold or a sub-range, which
  * splits it) are the mutators; context_map, context_peek (read folds' contents)
- * and context_search (find by keyword) are the reads. Nothing in the overlay
+ * and context_search (grep by regex) are the reads. Nothing in the overlay
  * carries an inline `[#id]` — not even fold stubs: ids exist only in tool
  * results, one uniform rule.
  *
@@ -70,6 +70,10 @@ import {
   planUnfold,
   planNudge,
   type SearchHit,
+  type SearchResult,
+  SEARCH_LINES_PER_MESSAGE,
+  SEARCH_LINES_PER_PATTERN,
+  compileSearchPattern,
   reconcileSpans,
   reconstructSpans,
   searchMessages,
@@ -544,90 +548,105 @@ export default function (pi: ExtensionAPI) {
   // --- search (read-only, find-by-content) ---------------------------------
 
   const SearchParam = Type.Object({
-    queries: Type.Array(
+    patterns: Type.Array(
       Type.String({
-        description: "Case-insensitive literal substring (not a regex).",
+        description:
+          "JavaScript (ECMAScript) regular expression, case-insensitive, matched per line. Escape literal metacharacters.",
       }),
       {
         description:
-          "Substrings to search, batched; each returns its own hit group.",
+          "Patterns to search, batched; each returns its own hit group.",
       },
     ),
   });
+
+  // Heading style, like ripgrep: a header per pattern, then per message a
+  // heading and its `lineNo: line` rows. Nothing describes this format to the
+  // model — it is legible on sight, so the tool description spends its tokens
+  // only on what the output cannot show (dialect, caps, where ids lead).
+  const searchGroup = (pattern: string, r: SearchResult): string => {
+    if (!r.totalLines) return `No hits for /${pattern}/.`;
+    const head =
+      `${plural(r.totalLines, "line")} in ${plural(r.totalMessages, "message")} for /${pattern}/` +
+      (r.foldedMessages ? ` (${r.foldedMessages} folded)` : "") +
+      ":";
+    const blocks = r.hits.map((h) =>
+      [
+        `[#${h.id}] ${h.role}${h.foldFrom ? ` (folded in [#${h.foldFrom}])` : ""}`,
+        ...h.lines.map((l) => `${l.line}: ${l.text}`),
+        ...(h.moreLines ? [`… +${h.moreLines} more`] : []),
+      ].join("\n"),
+    );
+    if (r.capped) blocks.push(`… capped at ${SEARCH_LINES_PER_PATTERN} lines`);
+    return [head, ...blocks].join("\n");
+  };
+
+  interface SearchDetails {
+    patterns: string[];
+    totalLines: number;
+    totalMessages: number;
+    folded: number;
+    hits: SearchHit[];
+  }
 
   pi.registerTool({
     name: "context_search",
     label: "Context search",
     description:
-      "Search live messages, folded messages, and fold summaries for a literal substring, case-insensitively. " +
-      "Returns at most one hit per message (its first occurrence) and shows up to 20 per query, with [#id], role " +
-      "(a matched summary has role 'fold'), the containing fold if any, and a snippet.",
+      "grep over the active context, including folded messages and fold summaries. " +
+      "Patterns are JavaScript regular expressions, case-insensitive, matched per line. " +
+      `Output is capped (${SEARCH_LINES_PER_MESSAGE} lines per message, ${SEARCH_LINES_PER_PATTERN} per pattern); ` +
+      "use [#id] with context_peek or context_unfold.",
     parameters: SearchParam,
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const msgs = reconcile(activeMsgs(ctx));
-      const groups = params.queries.map((q) => ({
-        q,
-        ...searchMessages(msgs, spans, q, 20),
-      }));
+      const groups = params.patterns.map((pattern) => {
+        // Only compilation can fail on model input, so only compilation is
+        // caught: a later throw is a bug and must not be reported as a bad
+        // pattern, which would send the agent rewriting a correct one.
+        // Throwing is how a tool signals failure to pi (docs/extensions.md);
+        // one bad pattern fails the whole batch loudly.
+        let re: RegExp;
+        try {
+          re = compileSearchPattern(pattern);
+        } catch (e) {
+          throw new Error(
+            `Invalid pattern /${pattern}/: ${(e as Error).message}`,
+          );
+        }
+        return { pattern, result: searchMessages(msgs, spans, re) };
+      });
       const text = groups
-        .map((g) =>
-          g.total
-            ? `${g.total} hit(s) for "${g.q}"${g.total > g.hits.length ? ` (showing ${g.hits.length})` : ""}:\n` +
-              g.hits
-                .map(
-                  (h) =>
-                    `[#${h.id}] ${h.role}${h.foldFrom ? ` (folded in [#${h.foldFrom}])` : ""} · ${h.snippet}`,
-                )
-                .join("\n")
-            : `No hits for "${g.q}".`,
-        )
+        .map((g) => searchGroup(g.pattern, g.result))
         .join("\n\n");
-      const total = groups.reduce((t, g) => t + g.total, 0);
-      const allHits = groups.flatMap((g) => g.hits);
       return {
         content: [{ type: "text", text }],
         details: {
-          queries: params.queries,
-          total,
-          folded: allHits.filter((h) => h.foldFrom).length,
-          hits: allHits,
-        } as {
-          queries: string[];
-          total: number;
-          folded: number;
-          hits: SearchHit[];
-        },
+          patterns: params.patterns,
+          totalLines: groups.reduce((t, g) => t + g.result.totalLines, 0),
+          totalMessages: groups.reduce((t, g) => t + g.result.totalMessages, 0),
+          folded: groups.reduce((t, g) => t + g.result.foldedMessages, 0),
+          hits: groups.flatMap((g) => g.result.hits),
+        } as SearchDetails,
       };
     },
     renderResult(result, opts, theme) {
-      const d = result.details as
-        | {
-            queries: string[];
-            total: number;
-            folded: number;
-            hits: SearchHit[];
-          }
-        | undefined;
+      const d = result.details as SearchDetails | undefined;
       if (!d) return new Text("", 0, 0);
-      if (!d.total)
-        return new Text(
-          theme.fg(
-            "muted",
-            `⌕ no hits for ${d.queries.map((q) => `"${q}"`).join(", ")}`,
-          ),
-          0,
-          0,
-        );
+      const pats = d.patterns.map((p) => `/${p}/`).join(", ");
+      if (!d.totalLines)
+        return new Text(theme.fg("muted", `⌕ no hits for ${pats}`), 0, 0);
       const head =
-        `⌕ ${plural(d.total, "hit")} for ${d.queries.map((q) => `"${q}"`).join(", ")}` +
+        `⌕ ${plural(d.totalLines, "line")} in ${plural(d.totalMessages, "msg")} for ${pats}` +
         (d.folded ? ` · ${d.folded} folded` : "");
       if (!opts.expanded) return new Text(theme.fg("accent", head), 0, 0);
-      const rows = d.hits.map((h) =>
+      const rows = d.hits.flatMap((h) => [
         theme.fg(
           "dim",
-          `[#${h.id}] ${h.role}${h.foldFrom ? ` (in ${h.foldFrom})` : ""} · ${h.snippet}`,
+          `[#${h.id}] ${h.role}${h.foldFrom ? ` (in ${h.foldFrom})` : ""}`,
         ),
-      );
+        ...h.lines.map((l) => theme.fg("dim", `${l.line}: ${l.text}`)),
+      ]);
       return new Text([theme.fg("accent", head), ...rows].join("\n"), 0, 0);
     },
   });

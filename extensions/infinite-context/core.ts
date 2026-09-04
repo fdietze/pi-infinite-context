@@ -685,63 +685,153 @@ export function serializeSpan(
   return out.join("\n\n");
 }
 
-export interface SearchHit {
-  id: string;
-  role: string;
-  foldFrom: string | null; // fromId of the fold hiding this msg, or null if live
-  snippet: string;
+// --- search ---------------------------------------------------------------
+
+// Output budget per pattern. Matching is cheap, printing is not: a pattern can
+// match thousands of lines, so emission is capped while the reported totals stay
+// true (the model needs to know how much it is NOT seeing to refine the pattern).
+export const SEARCH_LINES_PER_MESSAGE = 5;
+export const SEARCH_LINES_PER_PATTERN = 50;
+
+// A matched line is windowed to this many characters around its first match, in
+// the spirit of `rg --max-columns`: tool results routinely contain 10k-char
+// single lines (minified JSON, one-line logs) that would swamp the budget.
+const LINE_WINDOW_CHARS = 200;
+const LINE_WINDOW_LEAD = 60; // characters of context kept before the match
+
+/**
+ * Compile a search pattern.
+ *
+ * Flags: `i` only. Case-insensitivity is unconditional (an agent searching its
+ * own history wants recall, not exactness). NOT global, because search needs
+ * only the first match per line — a stateless RegExp has no `lastIndex` to carry
+ * between lines and cannot loop on zero-length matches. No `u` flag: it makes
+ * the dialect stricter and rejects escapes agents commonly write (a stray `\-`),
+ * which costs more than the Unicode-correctness it buys here.
+ *
+ * Throws SyntaxError on an invalid pattern. This is the ONLY step of a search
+ * that can fail on caller input, so it is separated from searchMessages (parse,
+ * don't validate): the shell reports a compile failure as a bad pattern, and
+ * anything thrown later is a genuine bug, not something the agent should retry.
+ *
+ * ReDoS is accepted, not mitigated: the pattern author is the agent itself and a
+ * catastrophic backtrack hangs only its own turn, which the user can interrupt.
+ */
+export function compileSearchPattern(pattern: string): RegExp {
+  return new RegExp(pattern, "i");
 }
 
 /**
- * Case-insensitive substring search across ALL taggable messages (live and
- * folded) AND every fold's summary digest, flagging which fold (if any) hides
- * each hit. The find-by-content complement to peek's look-by-id: locate a
- * keyword, then peek/unfold the hit. A fold whose *summary* matches is returned
- * as its own hit (role "fold", id = the fold's stub) - the digest is curated to
- * be findable, so it must be searchable even though it is not a stored message.
+ * The line numbering search reports: 1-based over the exact serializeContent
+ * text of a message.
+ */
+export function contentLines(message: AgentMessageLike): string[] {
+  return serializeContent(message).split("\n");
+}
+
+/**
+ * One-line, budget-bounded view of `line` around the match at `at`. Whitespace
+ * runs are collapsed only AFTER windowing, so the offset stays valid; collapsing
+ * is unobservable because no column is reported and it saves real tokens on
+ * indented or minified payloads.
+ */
+function windowLine(line: string, at: number): string {
+  const start = Math.max(0, at - LINE_WINDOW_LEAD);
+  const end = Math.min(line.length, start + LINE_WINDOW_CHARS);
+  return (
+    (start > 0 ? "…" : "") +
+    line.slice(start, end).replace(/\s+/g, " ").trim() +
+    (end < line.length ? "…" : "")
+  );
+}
+
+export interface LineMatch {
+  line: number; // 1-based line number within the message's serialized text
+  text: string; // windowed line content
+}
+
+export interface SearchHit {
+  id: string;
+  role: string; // message role, or "fold summary" for a matched fold digest
+  foldFrom: string | null; // fromId of the fold hiding this msg, or null if live
+  lines: LineMatch[]; // emitted matches, in line order
+  moreLines: number; // further matching lines in this message, not emitted
+}
+
+export interface SearchResult {
+  hits: SearchHit[];
+  totalLines: number; // matching lines found, ignoring all caps
+  totalMessages: number; // messages (and summaries) with at least one match
+  foldedMessages: number; // of those, how many are hidden inside a fold
+  capped: boolean; // the per-pattern budget stopped emission early
+}
+
+/**
+ * Grep a regular expression over ALL taggable messages (live and folded) AND
+ * every fold's summary digest, per line, flagging which fold (if any) hides each
+ * hit. The find-by-content complement to peek's look-by-id: locate a line, then
+ * peek/unfold it. A fold whose *summary* matches is returned as its own hit
+ * (role "fold summary", id = the fold's stub) — the digest is curated to be
+ * findable, so it must be searchable even though it is not a stored message.
+ *
+ * Matching per line (rather than over the whole message) is what makes `.*`
+ * behave the way the caller expects and what makes a line number addressable.
+ *
+ * Takes an already compiled pattern (compileSearchPattern), so an invalid
+ * pattern cannot reach this function.
  */
 export function searchMessages(
   msgs: BranchMsg[],
   spans: Span[],
-  query: string,
-  cap = 20,
-): { hits: SearchHit[]; total: number } {
-  const q = query.toLowerCase();
-  if (!q) return { hits: [], total: 0 };
+  re: RegExp,
+  linesPerMessage = SEARCH_LINES_PER_MESSAGE,
+  linesPerPattern = SEARCH_LINES_PER_PATTERN,
+): SearchResult {
   const foldOf = new Map<string, string>();
   for (const s of spans) for (const id of s.memberIds) foldOf.set(id, s.fromId);
   const hits: SearchHit[] = [];
-  let total = 0;
-  const push = (
+  let totalLines = 0;
+  let totalMessages = 0;
+  let foldedMessages = 0;
+  let emitted = 0;
+  const scan = (
     id: string,
     role: string,
     foldFrom: string | null,
-    text: string,
-    at: number,
+    lines: string[],
   ) => {
-    total++;
-    if (hits.length >= cap) return;
-    const start = Math.max(0, at - 40);
-    const end = Math.min(text.length, at + q.length + 40);
-    const snippet =
-      (start > 0 ? "…" : "") +
-      text.slice(start, end).replace(/\s+/g, " ").trim() +
-      (end < text.length ? "…" : "");
-    hits.push({ id, role, foldFrom, snippet });
+    const emit: LineMatch[] = [];
+    let matched = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const m = re.exec(lines[i]);
+      if (!m) continue;
+      matched++;
+      if (emit.length < linesPerMessage && emitted + emit.length < linesPerPattern)
+        emit.push({ line: i + 1, text: windowLine(lines[i], m.index) });
+    }
+    if (matched === 0) return;
+    totalLines += matched;
+    totalMessages++;
+    if (foldFrom) foldedMessages++;
+    emitted += emit.length;
+    // A message the budget silenced entirely still counts in the totals above,
+    // so the header stays honest about what the caps hid.
+    if (emit.length)
+      hits.push({ id, role, foldFrom, lines: emit, moreLines: matched - emit.length });
   };
-  for (const m of msgs) {
-    const text = serializeContent(m.message);
-    const idx = text.toLowerCase().indexOf(q);
-    if (idx >= 0) push(m.id, m.message.role, foldOf.get(m.id) ?? null, text, idx);
-  }
+  for (const m of msgs)
+    scan(m.id, m.message.role, foldOf.get(m.id) ?? null, contentLines(m.message));
   // Fold summaries: not stored as messages, so scanned separately. The fold
-  // itself is the hit (role "fold"); foldFrom is null since it IS the fold.
-  for (const s of spans) {
-    if (!s.summary) continue;
-    const idx = s.summary.toLowerCase().indexOf(q);
-    if (idx >= 0) push(s.fromId, "fold", null, s.summary, idx);
-  }
-  return { hits, total };
+  // itself is the hit; foldFrom is null since it IS the fold.
+  for (const s of spans)
+    if (s.summary) scan(s.fromId, "fold summary", null, s.summary.split("\n"));
+  return {
+    hits,
+    totalLines,
+    totalMessages,
+    foldedMessages,
+    capped: emitted >= linesPerPattern && emitted < totalLines,
+  };
 }
 
 /**

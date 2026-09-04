@@ -69,7 +69,7 @@ Replaces peek's former no-arg overview. The model takes one `context_map`, spots
 the fat or finished chunks, then batches several ranges into one
 `context_fold`. Backed by a pure core fn `buildContextMap(msgs, spans)`
 (tested); `index.ts` wires it. It complements, not duplicates, `context_search`:
-map = orientation without prior knowledge; search = find by known keyword.
+map = orientation without prior knowledge; search = grep by regex.
 
 ### 3. Uniform batching — no union / overloaded params
 
@@ -78,7 +78,7 @@ Every read/write tool takes an array; no optional-single or overloaded params.
 - `context_peek`: `ids: string[]` — fold-stub or inner-member ids; prints each
   resolved fold's members; folds deduped. The former no-arg mode is gone
   (-> `context_map`).
-- `context_search`: `queries: string[]` — each keyword returns its own hit group.
+- `context_search`: `patterns: string[]` — each regex returns its own hit group.
 - `context_fold` / `context_unfold`: keep `items: [...]`.
 
 Rationale: consistency, "always batch", make illegal states unrepresentable.
@@ -205,12 +205,12 @@ becomes conditional on an actual saving.
   net); expose it unchanged. `searchMessages`/`serializeSpan` already return
   array-friendly data for batched callers.
 - **index.ts**: rename the five tools; add `context_map`; `context_peek` takes
-  `ids: string[]`, `context_search` takes `queries: string[]`; number rendering
+  `ids: string[]`, `context_search` takes `patterns: string[]`; number rendering
   (`|Δ|`, projected ctx, non-saving guard, value-derived sign); move the shared
   preamble into the consolidated `promptGuidelines`.
 - **core.test.ts**: update unfold assertions to the net `restoredTokens`
   semantics; add a `buildContextMap` test; add batched `peek(ids)` /
-  `search(queries)` shape tests.
+  `search(patterns)` shape tests.
 
 ## Verification
 
