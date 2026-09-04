@@ -77,7 +77,9 @@ Every read/write tool takes an array; no optional-single or overloaded params.
 
 - `context_peek`: `ids: string[]` — fold-stub or inner-member ids; prints each
   resolved fold's members; folds deduped. The former no-arg mode is gone
-  (-> `context_map`).
+  (-> `context_map`). An optional `offset` starts the NAMED messages at a given
+  line (the line numbers `context_search` reports), so a hit deep inside a long
+  message is reachable; other members of the same fold still start at line 1.
 - `context_search`: `patterns: string[]` — each regex returns its own hit group.
 - `context_fold` / `context_unfold`: keep `items: [...]`.
 

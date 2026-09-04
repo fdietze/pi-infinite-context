@@ -206,6 +206,16 @@ export function serializeContent(message: AgentMessageLike): string {
 }
 
 /**
+ * The line numbering of a message, 1-based over the exact serializeContent
+ * text. Single source of truth (DRY) for the line numbers searchMessages
+ * reports and the ones serializeSpan prints, so a search hit and a peek offset
+ * always mean the same line.
+ */
+export function contentLines(message: AgentMessageLike): string[] {
+  return serializeContent(message).split("\n");
+}
+
+/**
  * Convert pi's active context entries into ordered, addressable messages. The
  * caller must pass buildContextEntries(), not getBranch(), so native compaction
  * summaries replace the raw messages they summarized.
@@ -662,12 +672,22 @@ export function summarizeTree(
 }
 
 /**
- * Serialize a span's hidden members for peek(id): per message its inner id,
- * role, size and content (capped, so peeking a fat span can't blow the budget).
+ * Serialize a span's hidden members for peek: per message its inner id, role,
+ * size and content, plus the printed line range whenever part of the message is
+ * off screen.
+ *
+ * `offsets` maps a message id to the 1-based line to start printing it at (the
+ * line numbering of contentLines, i.e. exactly the numbers searchMessages
+ * reports — one source of truth, so a search hit's line number addresses the
+ * same line here). Members absent from the map start at line 1.
+ *
+ * The character cap survives the line window: a message can hold a single
+ * 10k-char line, so lines alone do not bound the output.
  */
 export function serializeSpan(
   span: Span,
   msgs: BranchMsg[],
+  offsets: ReadonlyMap<string, number> = new Map(),
   cap = 2000,
 ): string {
   const byId = new Map(msgs.map((m) => [m.id, m.message] as const));
@@ -675,12 +695,31 @@ export function serializeSpan(
   for (const id of span.memberIds) {
     const m = byId.get(id);
     if (!m) continue;
-    const text = serializeContent(m);
-    const body =
-      text.length > cap
-        ? `${text.slice(0, cap)}… [+${text.length - cap} chars]`
-        : text;
-    out.push(`[#${id}] ${m.role} ${fmtTokens(estimateTokens(m))}\n${body}`);
+    const head = `[#${id}] ${m.role} ${fmtTokens(estimateTokens(m))}`;
+    const lines = contentLines(m);
+    const start = Math.max(1, Math.floor(offsets.get(id) ?? 1));
+    if (start > lines.length) {
+      out.push(`${head} · ${lines.length} lines (offset ${start} is past the end)`);
+      continue;
+    }
+    const text = lines.slice(start - 1).join("\n");
+    const truncated = text.length > cap;
+    const body = truncated
+      ? `${text.slice(0, cap)}… [+${text.length - cap} chars]`
+      : text;
+    // A line the cap cut in half is NOT printed, so the range must not claim it:
+    // `last + 1` is then a lossless resume offset. Clamped, because a single
+    // line longer than the cap still occupies its line (its tail stays out of
+    // reach either way).
+    const shown = body.split("\n").length;
+    const last = start + Math.max(1, truncated ? shown - 1 : shown) - 1;
+    // The range is printed only when it is news — i.e. something outside
+    // start..last exists. A message shown whole costs no extra tokens.
+    const range =
+      start > 1 || truncated
+        ? ` · lines ${start}-${last} of ${lines.length}`
+        : "";
+    out.push(`${head}${range}\n${body}`);
   }
   return out.join("\n\n");
 }
@@ -719,14 +758,6 @@ const LINE_WINDOW_LEAD = 60; // characters of context kept before the match
  */
 export function compileSearchPattern(pattern: string): RegExp {
   return new RegExp(pattern, "i");
-}
-
-/**
- * The line numbering search reports: 1-based over the exact serializeContent
- * text of a message.
- */
-export function contentLines(message: AgentMessageLike): string[] {
-  return serializeContent(message).split("\n");
 }
 
 /**
