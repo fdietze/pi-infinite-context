@@ -236,6 +236,14 @@ growth tracking and no escalation levels. Dropping below 75% re-arms the ladder,
 so a fold that lowers fill lets it nudge again on a later climb. The only bit of
 stateful logic is the pure `planNudge` in `core.ts`, tested in `core.test.ts`.
 
+When the nudge does not save the session in time, `session_before_compact`
+notifies the *user* (warning level) that pi's auto-compaction is discarding
+history folds would have kept searchable, pointing at `compaction.enabled:
+false`. It reacts to the event rather than to the setting — extensions cannot
+read settings, and only the event proves compaction is actually happening — and
+it stays out of the way: a manual `/compact` is silent, and compaction always
+proceeds.
+
 ## Out of scope
 
 - Auto-compaction behavior (we adapt to it; we do not change it).

@@ -236,6 +236,28 @@ export default function (pi: ExtensionAPI) {
     );
   });
 
+  // Warn the user when pi's native auto-compaction discards history. Folds keep
+  // their content searchable; compaction does not, so this is the one event that
+  // makes material unreachable for good.
+  //
+  // Why this hook rather than reading the compaction setting: extensions have no
+  // settings-read API, and a setting is only a map of what will happen. The hook
+  // fires on the territory — the compaction actually taking place — so a session
+  // that never compacts never warns, whatever the config says.
+  //
+  // A manual /compact is the user's own decision, so only automatic triggers
+  // warn. Compaction proceeds either way (returning nothing does not cancel):
+  // this reports, it does not intervene. `notify` is a no-op without a UI, so it
+  // needs no `hasUI` guard.
+  pi.on("session_before_compact", async (event, ctx) => {
+    if (event.reason === "manual") return;
+    ctx.ui.notify(
+      "infinite-context: pi's auto-compaction is discarding history that folds " +
+        "keep searchable. Set compaction.enabled: false to rely on folds only.",
+      "warning",
+    );
+  });
+
   // Replace folded ranges with a stub; live messages pass through untouched.
   pi.on("context", async (event, ctx) => {
     const messages = buildOverlay(
@@ -609,7 +631,7 @@ export default function (pi: ExtensionAPI) {
     name: "context_search",
     label: "Context search",
     description:
-      "grep over the active context, including folded messages and fold summaries. " +
+      "grep over every message, folded or not, plus fold summaries. " +
       "Patterns are JavaScript regular expressions, case-insensitive, matched per line. " +
       `Output is capped (${SEARCH_LINES_PER_MESSAGE} lines per message, ${SEARCH_LINES_PER_PATTERN} per pattern); ` +
       "use [#id] with context_peek or context_unfold.",
