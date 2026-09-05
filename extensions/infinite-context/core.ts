@@ -672,32 +672,32 @@ export function summarizeTree(
 }
 
 /**
- * Serialize a span's hidden members for peek: per message its inner id, role,
- * size and content, plus the printed line range whenever part of the message is
- * off screen.
+ * Serialize messages for peek: per message its id, role, size and content, plus
+ * the printed line range whenever part of the message is off screen.
  *
- * `offsets` maps a message id to the 1-based line to start printing it at (the
- * line numbering of contentLines, i.e. exactly the numbers searchMessages
- * reports — one source of truth, so a search hit's line number addresses the
- * same line here). Members absent from the map start at line 1.
+ * `offset` is the 1-based line every listed message starts at, in the numbering
+ * of contentLines — exactly the numbers searchMessages reports, one source of
+ * truth, so a search hit's line number addresses the same line here. Which
+ * messages that offset is meaningful for is the caller's decision: this prints
+ * what it is given.
  *
  * The character cap survives the line window: a message can hold a single
  * 10k-char line, so lines alone do not bound the output.
  */
-export function serializeSpan(
-  span: Span,
+export function serializeMessages(
+  ids: string[],
   msgs: BranchMsg[],
-  offsets: ReadonlyMap<string, number> = new Map(),
+  offset = 1,
   cap = 2000,
 ): string {
   const byId = new Map(msgs.map((m) => [m.id, m.message] as const));
+  const start = Math.max(1, Math.floor(offset));
   const out: string[] = [];
-  for (const id of span.memberIds) {
+  for (const id of ids) {
     const m = byId.get(id);
     if (!m) continue;
     const head = `[#${id}] ${m.role} ${fmtTokens(estimateTokens(m))}`;
     const lines = contentLines(m);
-    const start = Math.max(1, Math.floor(offsets.get(id) ?? 1));
     if (start > lines.length) {
       out.push(`${head} · ${lines.length} lines (offset ${start} is past the end)`);
       continue;
@@ -757,6 +757,11 @@ const LINE_WINDOW_LEAD = 60; // characters of context kept before the match
  * catastrophic backtrack hangs only its own turn, which the user can interrupt.
  */
 export function compileSearchPattern(pattern: string): RegExp {
+  // An empty pattern is valid regex syntax that matches every line of every
+  // message — thousands of hits that say nothing. It is a mistake, never a
+  // query, so it is rejected on the same path as a malformed pattern.
+  if (!pattern)
+    throw new SyntaxError("pattern is empty (it would match every line)");
   return new RegExp(pattern, "i");
 }
 

@@ -77,7 +77,7 @@ import {
   reconcileSpans,
   reconstructSpans,
   searchMessages,
-  serializeSpan,
+  serializeMessages,
   summarizeTree,
 } from "./core.ts";
 
@@ -501,14 +501,14 @@ export default function (pi: ExtensionAPI) {
       }),
       {
         description:
-          "Fold ids to read, batched. Ids resolving to the same fold are printed once.",
+          "Fold ids to read, batched. Ids resolving to the same fold are printed once (with `offset`, each named message prints separately).",
       },
     ),
     offset: Type.Optional(
       Type.Integer({
         minimum: 1,
         description:
-          "First line to print of each message named in `ids`; other members of the same fold still start at line 1. Line numbers are the ones context_search reports.",
+          "First line to print. Given, only the messages named in `ids` are printed, not their whole fold. Line numbers are the ones context_search reports.",
       }),
     ),
   });
@@ -523,18 +523,16 @@ export default function (pi: ExtensionAPI) {
     parameters: PeekParam,
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const msgs = reconcile(activeMsgs(ctx));
-      const seen = new Set<string>();
+      // An offset addresses a MESSAGE, so it selects one: a fold-level read has
+      // no meaningful offset, and printing every sibling of a fat fold defeats
+      // the windowed read the caller asked for. Without an offset the unit is
+      // the whole fold, as before.
+      const windowed = params.offset !== undefined;
+      const seen = new Set<string>(); // per message when windowed, else per fold
+      const folds = new Set<string>();
       const blocks: string[] = [];
       const missing: string[] = [];
       let members = 0;
-      // The line window applies to the messages the caller NAMED, not to every
-      // member of the fold they belong to: a fold's short members would
-      // otherwise print nothing at all.
-      const offsets = new Map(
-        params.offset === undefined
-          ? []
-          : params.ids.map((raw) => [bareId(raw), params.offset!] as const),
-      );
       for (const rawId of params.ids) {
         const id = bareId(rawId);
         const span = spans.find(
@@ -544,11 +542,19 @@ export default function (pi: ExtensionAPI) {
           missing.push(id);
           continue;
         }
-        if (seen.has(span.fromId)) continue;
-        seen.add(span.fromId);
-        members += span.memberIds.length;
+        const key = windowed ? id : span.fromId;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        folds.add(span.fromId);
+        const printIds = windowed ? [id] : span.memberIds;
+        members += printIds.length;
+        // The fold's size stays visible either way, so the model can read the
+        // rest without an offset when it wants to.
+        const head =
+          `fold [#${span.fromId}] · ${plural(span.memberIds.length, "member")}` +
+          (windowed ? `, showing [#${id}]:` : ":");
         blocks.push(
-          `fold [#${span.fromId}] · ${span.memberIds.length} members:\n\n${serializeSpan(span, msgs, offsets)}`,
+          `${head}\n\n${serializeMessages(printIds, msgs, params.offset)}`,
         );
       }
       const text =
@@ -560,7 +566,7 @@ export default function (pi: ExtensionAPI) {
           .join("\n\n") || "No folds for those ids.";
       return {
         content: [{ type: "text", text }],
-        details: { folds: seen.size, members, missing } as {
+        details: { folds: folds.size, members, missing } as {
           folds: number;
           members: number;
           missing: string[];

@@ -16,7 +16,7 @@ import {
   reconstructSpans,
   searchMessages,
   compileSearchPattern,
-  serializeSpan,
+  serializeMessages,
   stubTokens,
   summarizeTree,
   unitBounds,
@@ -273,56 +273,54 @@ test("summarizeTree: totals + one line per span in branch order", () => {
   assert.match(t.lines[1], /^\[#u4\] · 2 msgs · \S+ tok · \(no summary\)$/);
 });
 
-// --- serializeSpan ---------------------------------------------------------
+// --- serializeMessages -----------------------------------------------------
 
-test("serializeSpan: members with inner id + role + size + content, no range when shown whole", () => {
+test("serializeMessages: id + role + size + content per message, no range when shown whole", () => {
   const msgs = branchMessages(fiveUserBranch());
-  const span: Span = { fromId: "u2", memberIds: ["u2", "u3"], summary: "" };
-  const out = serializeSpan(span, msgs);
+  const out = serializeMessages(["u2", "u3"], msgs);
   assert.match(out, /\[#u2\] user \d+\ntwo two/);
   assert.match(out, /\[#u3\] user \d+\nthree three three/);
 });
 
-test("serializeSpan: long content is truncated with a marker; the range counts only printed lines", () => {
+test("serializeMessages: long content is truncated with a marker; the range counts only printed lines", () => {
   ts = 0;
   const branch = [userE("big", `${"z".repeat(5000)}\ntail`)];
-  const span: Span = { fromId: "big", memberIds: ["big"], summary: "" };
-  const out = serializeSpan(span, branchMessages(branch), new Map(), 2000);
+  const out = serializeMessages(["big"], branchMessages(branch), 1, 2000);
   assert.match(out, /· lines 1-1 of 2\n/, "the cut-off second line is not claimed");
   assert.match(out, /… \[\+3005 chars\]$/);
 });
 
-test("serializeSpan: the range stops at the last COMPLETE line, so start = last + 1 loses nothing", () => {
+test("serializeMessages: the range stops at the last COMPLETE line, so start = last + 1 loses nothing", () => {
   ts = 0;
   const lines = Array.from({ length: 10 }, (_, i) => `${i + 1}${"x".repeat(299)}`);
-  const branch = [userE("m", lines.join("\n"))];
-  const msgs = branchMessages(branch);
-  const span: Span = { fromId: "m", memberIds: ["m"], summary: "" };
-  const first = serializeSpan(span, msgs, new Map(), 2000);
+  const msgs = branchMessages([userE("m", lines.join("\n"))]);
+  const first = serializeMessages(["m"], msgs, 1, 2000);
   const last = Number(/lines 1-(\d+) of 10/.exec(first)![1]);
   assert.equal(last, 6, "line 7 is cut in half by the cap and is not claimed");
-  const resumed = serializeSpan(span, msgs, new Map([["m", last + 1]]), 2000);
+  const resumed = serializeMessages(["m"], msgs, last + 1, 2000);
   assert.equal(resumed.split("\n")[1], lines[last], "resumes at the full line 7");
 });
 
-test("serializeSpan: offset windows only the named message, other members start at line 1", () => {
+test("serializeMessages: the offset applies to every message printed", () => {
   ts = 0;
-  const branch = [
-    userE("long", "a\nb\nc\nd\ne"),
-    userE("short", "only line"),
-  ];
-  const span: Span = { fromId: "long", memberIds: ["long", "short"], summary: "" };
-  const out = serializeSpan(span, branchMessages(branch), new Map([["long", 4]]));
-  assert.match(out, /\[#long\] user \d+ · lines 4-5 of 5\nd\ne/);
-  assert.match(out, /\[#short\] user \d+\nonly line/);
+  const msgs = branchMessages([
+    userE("a", "a1\na2\na3"),
+    userE("b", "b1\nb2\nb3"),
+  ]);
+  const out = serializeMessages(["a", "b"], msgs, 3);
+  assert.match(out, /\[#a\] user \d+ · lines 3-3 of 3\na3/);
+  assert.match(out, /\[#b\] user \d+ · lines 3-3 of 3\nb3/);
 });
 
-test("serializeSpan: an offset past the last line says so instead of printing an empty range", () => {
+test("serializeMessages: an offset past the last line says so instead of printing an empty range", () => {
   ts = 0;
-  const branch = [userE("m", "a\nb")];
-  const span: Span = { fromId: "m", memberIds: ["m"], summary: "" };
-  const out = serializeSpan(span, branchMessages(branch), new Map([["m", 9]]));
+  const out = serializeMessages(["m"], branchMessages([userE("m", "a\nb")]), 9);
   assert.match(out, /· 2 lines \(offset 9 is past the end\)$/);
+});
+
+test("serializeMessages: ids that are not active messages are skipped", () => {
+  const msgs = branchMessages(fiveUserBranch());
+  assert.match(serializeMessages(["gone", "u1"], msgs), /^\[#u1\] user/);
 });
 
 // The search -> peek pipe only works if both count lines over the same text.
@@ -334,7 +332,7 @@ test("search line numbers address exactly the lines peek prints", () => {
   const span: Span = { fromId: "m", memberIds: ["m"], summary: "" };
   const hit = grep(msgs, [span], "needle").hits[0].lines[0];
   assert.equal(hit.line, 41);
-  const out = serializeSpan(span, msgs, new Map([["m", hit.line]]));
+  const out = serializeMessages(["m"], msgs, hit.line);
   const firstBodyLine = out.split("\n")[1];
   assert.equal(firstBodyLine, "the needle here");
 });
@@ -469,6 +467,11 @@ test("searchMessages: a long line is windowed around its first match", () => {
 
 test("compileSearchPattern: an invalid pattern throws (the shell turns it into a tool error)", () => {
   assert.throws(() => compileSearchPattern("("), SyntaxError);
+});
+
+test("compileSearchPattern: the empty pattern is rejected, whitespace is a real pattern", () => {
+  assert.throws(() => compileSearchPattern(""), /empty/);
+  assert.ok(compileSearchPattern(" ").test("a b"));
 });
 
 // --- reconcileSpans / reconstructSpans -----------------------------------
