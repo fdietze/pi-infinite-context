@@ -949,19 +949,28 @@ export function buildContextMap(
 }
 
 /**
- * Build the context overlay: replace folded ranges with a stub, and pass
- * every live message through UNTOUCHED. Live messages are not prefixed; the
- * model reads their ids from context_map/_search/_peek. Untouched live messages
- * keep the provider's native prefix cache intact (no per-call mutation).
- * Mutates only the replaced (span-first) message objects in place (like the pi
- * context handler). `active` must be branchMessages(buildContextEntries()) so
- * ids correlate with what the context event actually carries.
+ * Build the context overlay: replace folded ranges with a stub, remove results
+ * for folded tool calls, and pass every live message through UNTOUCHED. Live
+ * messages are not prefixed; the model reads their ids from
+ * context_map/_search/_peek. Untouched live messages keep the provider's native
+ * prefix cache intact (no per-call mutation). Mutates only the replaced
+ * (span-first) message objects in place (like the pi context handler). `active`
+ * must be branchMessages(buildContextEntries()) so ids correlate with what the
+ * context event actually carries.
  */
 export function buildOverlay(
   messages: AgentMessageLike[],
   active: BranchMsg[],
   spans: Span[],
 ): AgentMessageLike[] {
+  const spanByFrom = new Map(spans.map((s) => [s.fromId, s] as const));
+  const foldedMembers = new Set<string>();
+  const hiddenMembers = new Set<string>();
+  for (const span of spans) {
+    for (const id of span.memberIds) foldedMembers.add(id);
+    for (const id of span.memberIds.slice(1)) hiddenMembers.add(id);
+  }
+
   // Entry ids in context order per (timestamp,role) as a queue, to consume equal
   // keys position-stably. Needed because the provider message objects carry no
   // entry id; timestamp+role is the only shared key (see index.ts header).
@@ -969,17 +978,20 @@ export function buildOverlay(
   // Per entry id, its estimated token footprint (matches event.messages
   // content). Used for a span stub's hidden-token label.
   const idTokens = new Map<string, number>();
+  const foldedToolCallIds = new Set<string>();
   for (const { id, message: msg } of active) {
     const key = `${msg.timestamp}|${msg.role}`;
     const queue = idQueues.get(key) ?? idQueues.set(key, []).get(key)!;
     queue.push(id);
     idTokens.set(id, estimateTokens(msg));
+    if (foldedMembers.has(id) && msg.role === "assistant" && Array.isArray(msg.content)) {
+      for (const block of msg.content as Array<Record<string, unknown>>) {
+        if (block.type === "toolCall" && typeof block.id === "string") {
+          foldedToolCallIds.add(block.id);
+        }
+      }
+    }
   }
-
-  const spanByFrom = new Map(spans.map((s) => [s.fromId, s] as const));
-  const hiddenMembers = new Set<string>();
-  for (const s of spans)
-    for (const id of s.memberIds.slice(1)) hiddenMembers.add(id);
 
   const out: AgentMessageLike[] = [];
   for (const message of messages) {
@@ -988,6 +1000,16 @@ export function buildOverlay(
       continue;
     }
     const id = idQueues.get(`${message.timestamp}|${message.role}`)?.shift();
+    // Other context handlers can inject a result without a session entry id.
+    // The call id is the authoritative relation, so a folded call removes every
+    // matching result even when entry correlation fails (Correctness by Construction).
+    if (
+      message.role === "toolResult" &&
+      message.toolCallId &&
+      foldedToolCallIds.has(message.toolCallId)
+    ) {
+      continue;
+    }
     if (!id) {
       out.push(message);
       continue;

@@ -564,6 +564,74 @@ test("buildOverlay: empty-summary span renders a (folded N, X hidden) stub", () 
   assert.match(out[1].content as string, /^\(folded 4 messages, \S+ hidden\)$/);
 });
 
+test("buildOverlay: removes an injected result for a folded assistant call", () => {
+  ts = 0;
+  const branch = [userE("u1", "ask"), asstCalls("A", ["c1"])];
+  const messages = [
+    ...messagesOf(branch),
+    { role: "toolResult", content: "answer", toolCallId: "c1", timestamp: ++ts },
+  ];
+  const span: Span = { fromId: "A", memberIds: ["A"], summary: "asked" };
+
+  const out = buildOverlay(messages, branchMessages(branch), [span]);
+
+  assert.deepEqual(out.map((message) => message.role), ["user", "user"]);
+  assert.match(out[1].content as string, /^\(summary, \S+ hidden\) asked$/);
+  assert.ok(out.every((message) => message.toolCallId !== "c1"));
+});
+
+test("buildOverlay: retains an injected result for a live assistant call", () => {
+  ts = 0;
+  const branch = [userE("u1", "ask"), asstCalls("A", ["c1"])];
+  const injected: AgentMessageLike = {
+    role: "toolResult",
+    content: "answer",
+    toolCallId: "c1",
+    timestamp: ++ts,
+  };
+
+  const out = buildOverlay(
+    [...messagesOf(branch), injected],
+    branchMessages(branch),
+    [],
+  );
+
+  assert.equal(out.at(-1), injected);
+});
+
+test("buildOverlay: a folded result consumes its correlation queue entry", () => {
+  const call = (callId: string): AgentMessageLike => ({
+    role: "assistant",
+    content: [
+      { type: "toolCall", id: callId } as { type: string },
+    ] as AgentMessageLike["content"],
+  });
+  const result = (callId: string): AgentMessageLike => ({
+    role: "toolResult",
+    content: "answer",
+    toolCallId: callId,
+  });
+  // Missing timestamps deliberately put both results in the same positional
+  // correlation queue, as can also happen with equal millisecond timestamps.
+  const active = [
+    { id: "A", message: call("c1") },
+    { id: "R1", message: result("c1") },
+    { id: "B", message: call("c2") },
+    { id: "R2", message: result("c2") },
+  ];
+  const messages = active.map(({ message }) => ({ ...message }));
+  const span: Span = { fromId: "A", memberIds: ["A", "R1"], summary: "done" };
+
+  const out = buildOverlay(messages, active, [span]);
+
+  assert.deepEqual(out.map((message) => message.role), [
+    "user",
+    "assistant",
+    "toolResult",
+  ]);
+  assert.equal(out.at(-1)?.toolCallId, "c2");
+});
+
 // --- buildContextMap -------------------------------------------------------
 
 test("buildContextMap: interleaves live rows and one fold row in conversation order", () => {
