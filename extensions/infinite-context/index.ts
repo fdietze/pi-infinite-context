@@ -374,7 +374,7 @@ export default function (pi: ExtensionAPI) {
       "Replace inclusive message ranges with reversible fold stubs. A supplied summary stays visible in the stub; " +
       "hidden messages remain available to context_search, context_peek, and context_unfold. If a range touches an " +
       "assistant turn that made tool calls, the whole turn and all its tool results fold together. Existing folds " +
-      "touched by a range are absorbed whole, joining their summaries. Set replaceSummary on an item to replace " +
+      "touched by a range are absorbed whole, joining distinct summary clauses once. Set replaceSummary on an item to replace " +
       "or clear one existing fold's visible summary in place without changing its hidden messages.",
     promptSnippet:
       "Reversibly fold completed conversation history; use context_map for ids and context_search/context_peek/context_unfold to recover it",

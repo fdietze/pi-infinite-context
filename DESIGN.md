@@ -219,6 +219,19 @@ Replacement is deliberately a mode of the existing mutator rather than another
 tool or summary-reading API. It edits the already-visible handoff in place and
 does not compete with `context_map`, `context_peek`, or `context_search`.
 
+### 12. Rejoin copied summaries without amplification
+
+Partial unfold still copies the original summary to both remainder folds, so
+each remainder remains independently intelligible and no information is lost.
+When folds overlap again, `context_fold` merges their semicolon-separated
+summary clauses as an ordered set. Thus `S` plus `S` stays `S`, and a modified
+overlap such as `S; detail` plus `S` stays `S; detail`; distinct clauses retain
+first-seen order. This also repairs already-amplified summaries on their next
+merge. Explicit `replaceSummary` text remains exact until a later overlap merge.
+
+The persisted `Span` shape is unchanged. Old snapshots remain readable, and no
+summary provenance or second memory hierarchy is introduced.
+
 ## Implementation mapping
 
 - **core.ts**: add `buildContextMap(msgs, spans)` (pure, returns ordered rows for

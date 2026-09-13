@@ -396,6 +396,25 @@ export function stubTokens(summary: string, n: number, hidden: number): number {
   });
 }
 
+// Fold merges have always joined summaries with `; `. Splitting a fold copies
+// that joined text to both remnants, so rejoining must treat those generated
+// clauses as an ordered set: otherwise every split/rejoin doubles the visible
+// summary. Clause-level dedup also handles a remnant extended after the split
+// ("S" + "S; detail") while preserving every distinct clause. Replacement is
+// separate and exact: replaceSummary never passes through this normalization.
+function mergeSummaries(summaries: Array<string | undefined>): string {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const summary of summaries) {
+    for (const clause of summary?.split("; ") ?? []) {
+      if (!clause || seen.has(clause)) continue;
+      seen.add(clause);
+      merged.push(clause);
+    }
+  }
+  return merged.join("; ");
+}
+
 /**
  * Pure fold planning. Returns the new span state + report without mutating
  * the input. Multiple items that snap to the same tool unit (e.g. parallel tool
@@ -477,9 +496,7 @@ export function planFold(
         next.splice(i, 1);
       }
     }
-    const summary = [...inherited, item.summary ?? ""]
-      .filter((s) => s)
-      .join("; ");
+    const summary = mergeSummaries([...inherited, item.summary]);
     next.push({ fromId: memberIds[0], memberIds, summary });
     for (const id of memberIds) touched.add(id);
   }

@@ -72,6 +72,19 @@ function fiveUserBranch(): BranchEntry[] {
   ];
 }
 
+// Five messages with one tool call/result unit in the middle. Splitting around
+// A..R must preserve the unit and leave a fold on each side.
+function fiveMessageToolPairBranch(): BranchEntry[] {
+  ts = 0;
+  return [
+    userE("u1", "before"),
+    asstCalls("A", ["c1"]),
+    toolRes("R", "c1", "tool output needle"),
+    userE("u2", "after"),
+    userE("u3", "tail"),
+  ];
+}
+
 // --- estimateTokens / fmtTokens -------------------------------------------
 
 test("estimateTokens uses pi's estimator for text, tool calls, and images", () => {
@@ -283,6 +296,55 @@ test("planUnfold: sub-range snaps to whole tool units (no orphaned pair)", () =>
   assert.equal(fromsRestoredUnit, "A");
   const remnants = plan.spans.flatMap((s) => s.memberIds).sort();
   assert.deepEqual(remnants, ["A2", "u1"]);
+});
+
+test("split/rejoin round trips keep one copy of inherited and modified summary clauses", () => {
+  const branch = fiveMessageToolPairBranch();
+  const msgs = branchMessages(branch);
+  const originalIds = msgs.map((m) => m.id);
+  let spans = planFold(msgs, [], [
+    { from: "u1", to: "u3", summary: "S" },
+  ]).spans;
+
+  // A middle split copies S to both remnants. Extending one copy makes the two
+  // whole strings differ ("S; detail" vs "S"), so whole-string Set dedup is
+  // insufficient when the remnants rejoin.
+  const split = planUnfold(msgs, spans, [{ from: "A", to: "R" }]);
+  assert.deepEqual(split.applied, ["A"], "the whole tool pair moves together");
+  assert.deepEqual(split.spans.map((s) => s.summary), ["S", "S"]);
+  const modified = planFold(msgs, split.spans, [
+    { from: "u1", summary: "S; detail", replaceSummary: true },
+  ]);
+  spans = planFold(msgs, modified.spans, [{ from: "u1", to: "u3" }]).spans;
+  assert.equal(spans[0].summary, "S; detail");
+
+  const stableLength = spans[0].summary.length;
+  for (let cycle = 0; cycle < 20; cycle++) {
+    const partial = planUnfold(msgs, spans, [{ from: "A", to: "R" }]);
+    assert.equal(partial.restoredMsgs, 2);
+    spans = planFold(msgs, partial.spans, [{ from: "u1", to: "u3" }]).spans;
+    assert.equal(spans[0].summary.length, stableLength, `cycle ${cycle + 1}`);
+  }
+
+  assert.equal(spans.length, 1);
+  assert.equal(spans[0].summary, "S; detail");
+  assert.deepEqual(spans[0].memberIds, originalIds);
+  const hit = grep(msgs, spans, "tool output needle").hits[0];
+  assert.deepEqual([hit.id, hit.foldFrom], ["R", "u1"]);
+  assert.match(serializeMessages(spans[0].memberIds, msgs), /\[#R\]/);
+  assert.deepEqual(
+    reconstructSpans([
+      {
+        type: "custom",
+        customType: "infinite-context",
+        data: { spans },
+      },
+    ]),
+    spans,
+  );
+  const restored = planUnfold(msgs, spans, [{ from: "u1" }]);
+  assert.equal(restored.spans.length, 0);
+  assert.deepEqual(buildOverlay(messagesOf(branch), msgs, restored.spans), messagesOf(branch));
 });
 
 test("planUnfold: id matching no span is a noop", () => {
