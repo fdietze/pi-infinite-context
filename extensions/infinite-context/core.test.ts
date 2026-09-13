@@ -705,6 +705,17 @@ test("buildContextMap: huge fold summaries are previewed but their full visible 
   assert.ok(row.visibleTokens > row.tokens);
 });
 
+test("bounded previews do not split a UTF-16 surrogate pair", () => {
+  ts = 0;
+  const summary = `${"a".repeat(59)}😀tail`;
+  const msgs = branchMessages([userE("u1", summary)]);
+  const expected = `${"a".repeat(59)}…`;
+  assert.equal(buildContextMap(msgs, [])[0].text, expected);
+  const span: Span = { fromId: "u1", memberIds: ["u1"], summary };
+  assert.ok(summarizeTree([span], msgs).lines[0].endsWith(expected));
+  assert.doesNotMatch(expected, /[\uD800-\uDFFF]/);
+});
+
 test("paginateContextMap: defaults bound many rows and expose a stable continuation", () => {
   ts = 0;
   const branch = Array.from({ length: 125 }, (_, i) =>

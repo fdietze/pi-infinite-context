@@ -97,7 +97,7 @@ const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
 const tok = (n: number) => `${fmtTokens(n)} tok`;
 const estTok = (n: number) => `${fmtTokens(n)} tok est`;
 
-// Last-provider context fill as "20% (202.5k/1000k tok)", or "" when unknown.
+// Pi context estimate as "20% (202.5k/1000k tok)", or "" when unknown.
 function ctxFill(contextWindow: number, contextTokens: number | null): string {
   return contextWindow > 0 && contextTokens != null
     ? `${Math.round((contextTokens / contextWindow) * 100)}% (${fmtTokens(contextTokens)}/${fmtTokens(contextWindow)} tok)`
@@ -111,20 +111,21 @@ function overviewTail(spans: Span[], msgs: BranchMsg[]): string {
   return `folds: ${totalSpans} · ${tok(hiddenTokens)} hidden`;
 }
 
-// Projected context fill after a mutation. getContextUsage().tokens reflects the
-// LAST assistant usage (agent-session.js), so a just-made fold only shows on the
-// next call. Project it from last + the net token delta (fold: negative,
-// unfold: positive) so the reported numbers reconcile in place. Empty when the
-// last usage is unknown (e.g. right after compaction).
+// Projected context fill after a mutation. getContextUsage().tokens is Pi's
+// current estimate: last valid assistant usage plus estimated trailing messages,
+// or all estimated messages when no valid usage exists. The extension overlay's
+// mutation is not reflected until a later response, so project from the current
+// estimate plus the net token delta. Empty when the estimate is unknown (e.g.
+// right after compaction).
 function projectedCtx(
   usage: { contextWindow: number; tokens: number | null } | undefined,
   deltaTokens: number,
 ): string {
   const win = usage?.contextWindow ?? 0;
-  const last = usage?.tokens ?? null;
-  if (win <= 0 || last == null) return "";
-  const proj = Math.max(0, last + deltaTokens);
-  return ` → ctx ~${Math.round((proj / win) * 100)}% (last ${Math.round((last / win) * 100)}%)`;
+  const estimated = usage?.tokens ?? null;
+  if (win <= 0 || estimated == null) return "";
+  const proj = Math.max(0, estimated + deltaTokens);
+  return ` → ctx ~${Math.round((proj / win) * 100)}% (estimated ctx ${Math.round((estimated / win) * 100)}%)`;
 }
 
 // Signed percentage of the context window; sign derived from the value (never a
@@ -289,7 +290,7 @@ export default function (pi: ExtensionAPI) {
       "Index the active conversation in order. Live rows show id, role, chars/4 token estimate, and a short snippet; " +
       "fold rows distinguish the estimated visible stub cost from represented hidden-history cost and show a bounded " +
       `summary preview. Results use offset/limit pagination (defaults: offset 0, limit ${CONTEXT_MAP_DEFAULT_LIMIT}; max ${CONTEXT_MAP_MAX_LIMIT}). ` +
-      "The header reports totals and labels context fill as last-provider usage.",
+      "The header reports totals and labels context fill as Pi's current estimate, not an exact or billable token count.",
     parameters: Type.Object({
       offset: Type.Optional(
         Type.Integer({
@@ -327,7 +328,7 @@ export default function (pi: ExtensionAPI) {
         `${page.totalRows} rows total · ${shown} · folds: ${totalSpans}` +
         ` · ${estTok(visibleStubTokens)} visible fold stubs` +
         ` · ${estTok(hiddenTokens)} represented hidden history` +
-        (fill ? ` · last-provider ctx ${fill}` : "");
+        (fill ? ` · Pi context estimate ${fill}` : "");
       const lines = page.rows.map((r) =>
         r.kind === "fold"
           ? `[#${r.id}] ⊟ ${plural(r.msgs, "msg")} · ${estTok(r.visibleTokens)} visible stub · ${estTok(r.tokens)} hidden history · ${r.text}`

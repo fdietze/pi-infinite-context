@@ -27,11 +27,12 @@ trust and cross-check.
   `promptGuidelines`). `peek`/`search`/`unfold` carry only a `description`.
   Search is mentioned only indirectly, inside fold's recovery guideline.
 - Reported-number bugs (all confirmed in code):
-  - **A — `ctx %` lags the action.** `getContextUsage().tokens` is derived from
-    the last assistant `usage` (`calculateContextTokens` in `agent-session.js`).
-    Within a turn, a just-made fold only takes effect on the next `context`
-    build, so `ctx %` is unchanged while `freed` is a prediction. They do not
-    reconcile until the next LLM response.
+  - **A — `ctx %` lags the action.** `getContextUsage().tokens` is Pi's current
+    context estimate: the last valid assistant usage plus estimated trailing
+    messages, or all-estimated messages when no valid usage exists. A fold
+    changes the extension overlay sent to the provider, not that estimate, so
+    `ctx %` is unchanged while `freed` is a projection. They reconcile after a
+    subsequent valid assistant response.
   - **B — asymmetric definitions.** `fold.freedTokens` is *net*
     (`Σ(live − stub)`, excludes already-folded members); `unfold.restoredTokens`
     is *gross* (`Σ member tokens`, ignores the removed stub and remnant stubs).
@@ -65,8 +66,8 @@ Lists the current context in conversation order, with optional zero-based
 - fold -> `[#id] ⊟ <n> msgs · <visible stub estimate> · <hidden-history estimate> · <~60-char summary preview>`
 
 The header reports total rows, the shown range, fold totals, aggregate visible
-stub and represented hidden-history estimates, and context fill from the last
-provider usage. Estimates are explicitly chars/4; they are not tokenizer-exact.
+stub and represented hidden-history estimates, and Pi's current context estimate.
+These are estimates, not tokenizer-exact measurements or billable token counts.
 A continuation line gives the next offset, and truncated fold previews point to
 `context_peek`'s targeted full-summary mode.
 
@@ -125,10 +126,12 @@ Rendering:
   from the value, so no double minus (fixes C).
 - Guard: fold with `Δlive >= 0` -> "no net saving (stub/summary >= hidden
   content)" instead of a misleading "freed -N" (fixes C).
-- ctx line projected: `→ ctx ~37% (last 40%)` from
-  `clamp0(last_tokens + Δlive) / window`; omitted when last usage is unknown.
-  Honest that the measured usage lags, and reconciles by construction:
-  `before − freed = projected` (fixes A). Symmetric definition fixes B.
+- ctx line projected: `→ ctx ~37% (estimated ctx 40%)` from
+  `clamp0(estimated_tokens + Δlive) / window`; omitted when Pi's estimate is
+  unknown (for example, immediately after compaction). This is explicitly a
+  projection, not an exact or billable token count, and reconciles by
+  construction: `before − freed = projected` (fixes A). Symmetric definition
+  fixes B.
 
 ### 6. Drop live-message prefixes (ids come from the map)
 
@@ -192,8 +195,9 @@ actually in.
 ### 8. Exact-as-possible token numbers
 
 Exact per-message counts are not obtainable: providers report only whole-request
-totals after the fact and expose no portable tokenizer; pi itself plans
-compaction from this same estimate plus the last assistant usage. So the ceiling
+totals after the fact and expose no portable tokenizer. Pi's current context
+estimate combines the last valid assistant usage with this estimator for trailing
+messages, or estimates every message when no valid usage exists. So the ceiling
 is *agreeing with pi*: `estimateTokens` now mirrors pi's `estimateTokens`
 byte-for-byte (per-role chars/4, images at the flat `ESTIMATED_IMAGE_CHARS =
 4800`, bash command+output, summary text). `stubTokens` measures exactly the

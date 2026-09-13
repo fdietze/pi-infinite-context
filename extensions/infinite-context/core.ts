@@ -46,9 +46,11 @@ export function nudgeBand(percent: number): number | null {
 // still fires; dropping below the base resets to 0 (re-arm). Pure so the one
 // bit of stateful logic stays under the test gate.
 //
-// The Map Is Not the Territory: `percent` derives from getContextUsage().tokens,
-// which is the last assistant usage and lags a just-made fold by one turn — the
-// re-arm is therefore one turn late, which is acceptable for a nudge.
+// The Map Is Not the Territory: `percent` derives from Pi's current context
+// estimate: the last valid assistant usage plus estimated trailing messages, or
+// all estimated messages when no valid usage exists. A just-made fold is not in
+// that provider-backed estimate until a later response, so re-arm can still be
+// one turn late, which is acceptable for a nudge.
 export function planNudge(
   percent: number,
   lastBand: number,
@@ -146,10 +148,10 @@ function contentChars(c: Content | undefined): number {
  * Byte-for-byte mirror of pi's estimateTokens (compaction.ts): per-role char
  * count / 4, rounded up. Mirrored instead of imported to keep the core free of
  * pi imports (testable in isolation) — exact counts are impossible anyway:
- * providers expose no portable per-message tokenizer, and pi itself plans
- * compaction with this same estimate plus the last reported assistant usage.
- * Matching pi's numbers is therefore the accuracy ceiling, and it keeps our
- * freed/hidden math consistent with pi's compaction thresholds.
+ * providers expose no portable per-message tokenizer. Pi combines this
+ * estimator with the last valid assistant usage to estimate current context.
+ * Matching its per-message estimates is therefore the accuracy ceiling, and it
+ * keeps our freed/hidden math consistent with pi's compaction thresholds.
  */
 export function estimateTokens(message: AgentMessageLike): number {
   let chars = 0;
@@ -642,6 +644,16 @@ export function reconcileSpans(
  * Overview of the fold tree: totals + one line per span (branch order). Used by
  * peek() and the fold/unfold result tails.
  */
+function boundedPreview(s: string, limit: number): {
+  text: string;
+  truncated: boolean;
+} {
+  if (s.length <= limit) return { text: s, truncated: false };
+  const last = s.charCodeAt(limit - 1);
+  const end = last >= 0xd800 && last <= 0xdbff ? limit - 1 : limit;
+  return { text: `${s.slice(0, end)}…`, truncated: true };
+}
+
 export function summarizeTree(
   spans: Span[],
   msgs: BranchMsg[],
@@ -662,9 +674,7 @@ export function summarizeTree(
     hiddenTokens += tok;
     const n = s.memberIds.length;
     const label = s.summary
-      ? s.summary.length > 60
-        ? `${s.summary.slice(0, 60)}…`
-        : s.summary
+      ? boundedPreview(s.summary, CONTEXT_MAP_PREVIEW_CHARS).text
       : "(no summary)";
     return `[#${s.fromId}] · ${n} msg${n > 1 ? "s" : ""} · ${fmtTokens(tok)} tok · ${label}`;
   });
@@ -954,13 +964,8 @@ export function buildContextMap(
   const hiddenMembers = new Set<string>();
   for (const s of spans)
     for (const id of s.memberIds.slice(1)) hiddenMembers.add(id);
-  const snip = (s: string) => {
-    const one = s.replace(/\s+/g, " ").trim();
-    return {
-      text: one.length > snippetLen ? `${one.slice(0, snippetLen)}…` : one,
-      truncated: one.length > snippetLen,
-    };
-  };
+  const snip = (s: string) =>
+    boundedPreview(s.replace(/\s+/g, " ").trim(), snippetLen);
   const rows: MapRow[] = [];
   for (const { id, message } of msgs) {
     if (hiddenMembers.has(id)) continue;
