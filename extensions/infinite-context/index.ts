@@ -136,7 +136,7 @@ interface MutateDetails {
   ok: boolean; // applied something
   msgs: number; // messages folded / restored
   replacements: number; // summaries replaced in place (fold only)
-  deltaTokens: number; // freed (fold) / restored (unfold)
+  deltaTokens: number; // fold: before−after; unfold: after−before
   tail: string; // standing state line (folds · hidden · ctx)
   summaries: string[]; // fold digests (empty for unfold)
   failed: string[]; // unresolved ids
@@ -166,9 +166,19 @@ function renderMutate(
         .filter(Boolean)
         .join(" · ")
     : `unfolded ${plural(d.msgs, "msg")}`;
-  const amount = !fold || d.msgs ? ` · ${verb} ${tok(d.deltaTokens)}` : "";
+  const amount = fold
+    ? d.deltaTokens > 0
+      ? `${verb} ${tok(d.deltaTokens)}`
+      : d.deltaTokens < 0
+        ? `added ${tok(-d.deltaTokens)}`
+        : "no estimated token change"
+    : d.deltaTokens > 0
+      ? `${verb} ${tok(d.deltaTokens)}`
+      : d.deltaTokens < 0
+        ? `freed ${tok(-d.deltaTokens)}`
+        : "no estimated token change";
   const head = d.ok
-    ? `${glyph} ${work}${amount}`
+    ? `${glyph} ${work} · ${amount}`
     : `${glyph} nothing ${past} · ${d.failed.length} ${d.failLabel}`;
   if (!opts.expanded) return new Text(theme.fg(color, head), 0, 0);
   const lines = [theme.fg(color, head)];
@@ -375,7 +385,8 @@ export default function (pi: ExtensionAPI) {
       "hidden messages remain available to context_search, context_peek, and context_unfold. If a range touches an " +
       "assistant turn that made tool calls, the whole turn and all its tool results fold together. Existing folds " +
       "touched by a range are absorbed whole, joining distinct summary clauses once. Set replaceSummary on an item to replace " +
-      "or clear one existing fold's visible summary in place without changing its hidden messages.",
+      "or clear one existing fold's visible summary in place without changing its hidden messages. Reported token " +
+      "changes compare the before/after overlays using pi's chars/4 estimator; they are not exact billed usage.",
     promptSnippet:
       "Reversibly fold completed conversation history; use context_map for ids and context_search/context_peek/context_unfold to recover it",
     promptGuidelines: [
@@ -398,17 +409,11 @@ export default function (pi: ExtensionAPI) {
       const usage = ctx.getContextUsage();
       const win = usage?.contextWindow ?? 0;
       const tail = overviewTail(spans, msgs);
-      // Fold lowers live tokens -> delta is negative; freedTokens is the
-      // positive magnitude. freedTokens <= 0 means the stub/summary is as big as
-      // the hidden content: the fold still applied, but there is no net saving.
-      const saved = plan.freedTokens > 0;
+      // freedTokens is the complete before-overlay minus after-overlay estimate,
+      // so it also covers old stubs absorbed and summary-only replacement.
       const actions = [
         plan.applied.length
-          ? `folded ${plural(plan.folded, "msg")} into ${plural(plan.applied.length, "fold")}: ${plan.applied.join(", ")}, ` +
-            (saved
-              ? `freed ${fmtTokens(plan.freedTokens)}${pctOf(-plan.freedTokens, win)}`
-              : "no net saving (stub/summary ≥ hidden content)") +
-            projectedCtx(usage, -plan.freedTokens)
+          ? `folded ${plural(plan.folded, "msg")} into ${plural(plan.applied.length, "fold")}: ${plan.applied.join(", ")}`
           : "",
         plan.replaced.length
           ? `replaced ${plural(plan.replaced.length, "summary")} in place: ${plan.replaced.join(", ")}`
@@ -420,7 +425,14 @@ export default function (pi: ExtensionAPI) {
           ? `invalid replacement(s), which require summary and forbid to: ${plan.invalid.join(", ")}`
           : "",
       ].filter(Boolean);
-      const head = `${actions.length ? `+ ${actions.join(". ")}` : "Folded nothing"}${failures.length ? `. ${failures.join(". ")}` : ""}`;
+      const delta = -plan.freedTokens; // live-context after − before
+      const accounting =
+        plan.freedTokens > 0
+          ? `freed ~${fmtTokens(plan.freedTokens)} estimated tok${pctOf(delta, win)}`
+          : plan.freedTokens < 0
+            ? `added ~${fmtTokens(-plan.freedTokens)} estimated tok${pctOf(delta, win)}${plan.applied.length ? " (stub/summary ≥ hidden content)" : ""}`
+            : "no estimated live-token change";
+      const head = `${actions.length ? `+ ${actions.join(". ")}, ${accounting}${projectedCtx(usage, delta)}` : "Folded nothing"}${failures.length ? `. ${failures.join(". ")}` : ""}`;
       return {
         content: [{ type: "text", text: `${head}\n${tail}` }],
         details: {
@@ -472,7 +484,8 @@ export default function (pi: ExtensionAPI) {
       "Restore folded messages — inverse of context_fold. Restores a whole fold, or the from..to sub-range, " +
       "which splits the fold and leaves up to two remainder folds, each carrying the original summary. Assistant " +
       "turns with tool calls move together with all their tool results. To only read folded content, use " +
-      "context_peek instead.",
+      "context_peek instead. Reported token changes compare the before/after overlays using pi's chars/4 estimator; " +
+      "they are not exact billed usage.",
     parameters: UnfoldParam,
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const msgs = reconcile(activeMsgs(ctx));
@@ -487,14 +500,19 @@ export default function (pi: ExtensionAPI) {
       const usage = ctx.getContextUsage();
       const win = usage?.contextWindow ?? 0;
       const tail = overviewTail(spans, msgs);
-      // Unfold raises live tokens -> delta is positive (net: members + remnant
-      // stubs − removed stub).
-      // Cross-fold ranges are rejected rather than clamped, so they are reported
-      // separately from ids that simply are not folded.
+      // restoredTokens is the complete after-overlay minus before-overlay
+      // estimate. Cross-fold ranges are rejected rather than clamped, so they
+      // are reported separately from ids that simply are not folded.
       const failed = [...plan.noop, ...plan.invalid];
+      const accounting =
+        plan.restoredTokens > 0
+          ? `restored ~${fmtTokens(plan.restoredTokens)} estimated tok${pctOf(plan.restoredTokens, win)}`
+          : plan.restoredTokens < 0
+            ? `freed ~${fmtTokens(-plan.restoredTokens)} estimated tok${pctOf(plan.restoredTokens, win)}`
+            : "no estimated live-token change";
       const head =
         (plan.applied.length
-          ? `− unfolded ${plural(plan.restoredMsgs, "msg")}: ${plan.applied.join(", ")}, restored ${fmtTokens(plan.restoredTokens)}${pctOf(plan.restoredTokens, win)}${projectedCtx(usage, plan.restoredTokens)}`
+          ? `− unfolded ${plural(plan.restoredMsgs, "msg")}: ${plan.applied.join(", ")}, ${accounting}${projectedCtx(usage, plan.restoredTokens)}`
           : "Unfolded nothing") +
         (plan.noop.length ? `. not folded: ${plan.noop.join(", ")}` : "") +
         (plan.invalid.length

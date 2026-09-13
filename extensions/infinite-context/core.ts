@@ -369,7 +369,7 @@ export interface FoldPlan {
   folded: number; // distinct folded messages
   unknown: string[]; // ids that could not be resolved
   invalid: string[]; // malformed summary-replacement requests
-  freedTokens: number; // net context tokens freed (live members - new stubs)
+  freedTokens: number; // estimated overlay tokens before − after (positive = freed)
 }
 
 // Stub text carries NO inline [#id]: ids exist only in tool results (map/
@@ -386,8 +386,8 @@ function stubText(summary: string, n: number, hidden: number): string {
 
 /**
  * Token cost of a span's stub message, exactly as buildOverlay renders it,
- * measured with the same estimator as every other count. Single source (DRY)
- * for the freed/restored net-token math in planFold and planUnfold.
+ * measured with the same estimator as every other count. buildOverlay uses the
+ * same stub text, and plans compare complete overlays rather than re-deriving it.
  */
 export function stubTokens(summary: string, n: number, hidden: number): number {
   return estimateTokens({
@@ -436,11 +436,7 @@ export function planFold(
     memberIds: s.memberIds.slice(),
   }));
   const indexById = new Map(msgs.map((m, i) => [m.id, i] as const));
-  const tokById = new Map(
-    msgs.map((m) => [m.id, estimateTokens(m.message)] as const),
-  );
-  // Members already folded before this call do not count as newly freed.
-  const priorMembers = new Set(spans.flatMap((s) => s.memberIds));
+  const beforeTokens = estimateOverlayTokens(msgs, spans);
   const bounds = unitBounds(msgs);
   const unknown: string[] = [];
   const invalid: string[] = [];
@@ -506,18 +502,9 @@ export function planFold(
   const replacedSpans = next.filter((s) =>
     s.memberIds.some((id) => replacementMembers.has(id)),
   );
-  // freed = newly-hidden live members minus the stub(s) that replace them.
-  // Members folded by a prior span are excluded (already saved).
-  let freedTokens = 0;
-  for (const s of resultSpans) {
-    const hidden = s.memberIds.reduce((t, id) => t + (tokById.get(id) ?? 0), 0);
-    const live = s.memberIds.reduce(
-      (t, id) => t + (priorMembers.has(id) ? 0 : (tokById.get(id) ?? 0)),
-      0,
-    );
-    const stubTok = stubTokens(s.summary, s.memberIds.length, hidden);
-    freedTokens += live - stubTok;
-  }
+  // Positive means the final overlay is smaller. Comparing complete overlays
+  // credits old stubs removed by absorption and makes a no-op re-fold exactly 0.
+  const freedTokens = beforeTokens - estimateOverlayTokens(msgs, next);
   return {
     spans: next,
     applied: resultSpans.map((s) => s.fromId),
@@ -540,7 +527,7 @@ export interface UnfoldPlan {
   applied: string[]; // fromId of each restored sub-range
   noop: string[]; // ids matching no span
   invalid: string[]; // "from..to" ranges whose `to` lies outside `from`'s fold
-  restoredTokens: number; // net context tokens added (restored members + remnant stubs − removed stub)
+  restoredTokens: number; // estimated overlay tokens after − before (positive = added)
   restoredMsgs: number; // messages brought back live
 }
 
@@ -563,16 +550,11 @@ export function planUnfold(
     memberIds: s.memberIds.slice(),
   }));
   const indexById = new Map(msgs.map((m, i) => [m.id, i] as const));
-  const tokById = new Map(
-    msgs.map((m) => [m.id, estimateTokens(m.message)] as const),
-  );
+  const beforeTokens = estimateOverlayTokens(msgs, spans);
   const bounds = unitBounds(msgs);
-  const sumTok = (ids: string[]) =>
-    ids.reduce((t, id) => t + (tokById.get(id) ?? 0), 0);
   const applied: string[] = [];
   const noop: string[] = [];
   const invalid: string[] = [];
-  let restoredTokens = 0;
   let restoredMsgs = 0;
   for (const item of items) {
     const si = next.findIndex(
@@ -637,24 +619,14 @@ export function planUnfold(
       continue;
     }
     next.splice(si, 1);
-    const origStub = stubTokens(
-      span.summary,
-      span.memberIds.length,
-      sumTok(span.memberIds),
-    );
-    let remnantStub = 0;
-    if (left.length) {
+    if (left.length)
       next.push({ fromId: left[0], memberIds: left, summary: span.summary });
-      remnantStub += stubTokens(span.summary, left.length, sumTok(left));
-    }
-    if (right.length) {
+    if (right.length)
       next.push({ fromId: right[0], memberIds: right, summary: span.summary });
-      remnantStub += stubTokens(span.summary, right.length, sumTok(right));
-    }
     applied.push(restored[0]);
     restoredMsgs += restored.length;
-    restoredTokens += sumTok(restored) + remnantStub - origStub;
   }
+  const restoredTokens = estimateOverlayTokens(msgs, next) - beforeTokens;
   return { spans: next, applied, noop, invalid, restoredTokens, restoredMsgs };
 }
 
@@ -992,6 +964,20 @@ export function buildContextMap(
     });
   }
   return rows;
+}
+
+/** Estimated size of the exact overlay emitted for `spans`. */
+export function estimateOverlayTokens(
+  msgs: BranchMsg[],
+  spans: Span[],
+): number {
+  // buildOverlay mutates only top-level fields of replaced messages, so shallow
+  // copies keep both the caller's messages and the active correlation source pure.
+  const messages = msgs.map(({ message }) => ({ ...message }));
+  return buildOverlay(messages, msgs, spans).reduce(
+    (total, message) => total + estimateTokens(message),
+    0,
+  );
 }
 
 /**

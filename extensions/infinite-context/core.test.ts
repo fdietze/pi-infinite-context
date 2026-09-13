@@ -7,6 +7,7 @@ import {
   branchMessages,
   buildContextMap,
   buildOverlay,
+  estimateOverlayTokens,
   estimateTokens,
   fmtTokens,
   planFold,
@@ -156,13 +157,59 @@ test("planFold: two items hitting the same tool unit merge into ONE stub, keep t
   assert.deepEqual(plan.summaries, ["f01 done"]);
 });
 
-test("planFold: freedTokens > 0 for a fresh fold, and excludes already-folded members", () => {
+test("planFold: accounting is the exact before/after overlay estimate", () => {
   const msgs = branchMessages(batchedReadBranch());
   const first = planFold(msgs, [], [{ from: "R1" }]);
   assert.ok(first.freedTokens > 0, "fresh fold frees tokens");
-  // Re-folding an already folded range frees no new live tokens.
+  assert.equal(
+    first.freedTokens,
+    estimateOverlayTokens(msgs, []) - estimateOverlayTokens(msgs, first.spans),
+  );
+
+  // Re-folding an unchanged fold removes one old stub and adds the same stub:
+  // the overlay does not change, so neither should the estimate.
   const second = planFold(msgs, first.spans, [{ from: "R1" }]);
-  assert.ok(second.freedTokens <= 0, "no double-counting already-folded members");
+  assert.equal(second.freedTokens, 0);
+});
+
+test("planFold: absorbing a stub credits the visible stub it removes", () => {
+  const msgs = branchMessages(fiveUserBranch());
+  const inner = planFold(msgs, [], [
+    { from: "u3", to: "u4", summary: "inner" },
+  ]);
+  const absorbed = planFold(msgs, inner.spans, [
+    { from: "u1", to: "u5", summary: "outer" },
+  ]);
+  const actualDelta =
+    estimateOverlayTokens(msgs, inner.spans) -
+    estimateOverlayTokens(msgs, absorbed.spans);
+  assert.equal(absorbed.freedTokens, actualDelta);
+});
+
+test("planFold: summary replacement reports shorter and longer stub deltas", () => {
+  const msgs = branchMessages(fiveUserBranch());
+  const folded = planFold(msgs, [], [
+    { from: "u1", to: "u5", summary: "x".repeat(100) },
+  ]);
+  const shorter = planFold(msgs, folded.spans, [
+    { from: "u1", summary: "short", replaceSummary: true },
+  ]);
+  assert.ok(shorter.freedTokens > 0);
+  assert.equal(
+    shorter.freedTokens,
+    estimateOverlayTokens(msgs, folded.spans) -
+      estimateOverlayTokens(msgs, shorter.spans),
+  );
+
+  const longer = planFold(msgs, shorter.spans, [
+    { from: "u1", summary: "y".repeat(200), replaceSummary: true },
+  ]);
+  assert.ok(longer.freedTokens < 0, "a longer replacement adds live tokens");
+  assert.equal(
+    longer.freedTokens,
+    estimateOverlayTokens(msgs, shorter.spans) -
+      estimateOverlayTokens(msgs, longer.spans),
+  );
 });
 
 test("planFold: single standalone message -> single-member span", () => {
@@ -212,6 +259,11 @@ test("planFold: summary replacement and clearing preserve the fold and hidden id
   assert.equal(grep(msgs, replaced.spans, "old handoff").totalLines, 0);
   assert.equal(grep(msgs, replaced.spans, "new handoff").totalLines, 1);
   assert.match(serializeMessages(replaced.spans[0].memberIds, msgs), /\[#u5\]/);
+  assert.equal(
+    buildOverlay(messagesOf(fiveUserBranch()), msgs, replaced.spans).length,
+    buildOverlay(messagesOf(fiveUserBranch()), msgs, folded.spans).length,
+    "replacement changes the handoff text without expanding hidden history",
+  );
 
   const cleared = planFold(msgs, replaced.spans, [
     { from: "u1", summary: "", replaceSummary: true },
@@ -253,6 +305,7 @@ test("planUnfold: bare span fromId unfolds the whole fold", () => {
   assert.equal(plan.spans.length, 0, "fold fully dissolved");
   assert.deepEqual(plan.applied, ["u1"]);
   assert.ok(plan.restoredTokens > 0);
+  assert.equal(plan.restoredTokens, folded.freedTokens, "whole unfold is symmetric");
 });
 
 test("planUnfold: a bare inner member id (no `to`) also unfolds the WHOLE fold", () => {
@@ -284,6 +337,11 @@ test("planUnfold: sub-range splits the fold into two remnants that inherit the s
     stubTokens("s", 2, hRight) -
     stubTokens("s", 5, hAll);
   assert.equal(plan.restoredTokens, expected);
+  assert.equal(
+    plan.restoredTokens,
+    estimateOverlayTokens(msgs, plan.spans) -
+      estimateOverlayTokens(msgs, folded.spans),
+  );
 });
 
 test("planUnfold: sub-range snaps to whole tool units (no orphaned pair)", () => {

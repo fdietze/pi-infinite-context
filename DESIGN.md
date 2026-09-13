@@ -100,20 +100,19 @@ call). Second-order thinking: prompt tokens are a permanent recurring cost.
 
 ### 5. Unified, reconciling numbers (fix A / B / C)
 
-Both mutators compute `Δlive` — the net change to live-context tokens — with the
-same formula:
+Both mutators compute `Δlive` — the net change to estimated live-context tokens
+— by building the exact before and after overlays and summing the existing
+chars/4 per-message estimator:
 
-- fold: `Δlive = stub_new − Σ(newly hidden live members)` (excludes
-  already-folded members) -> negative = freed.
-- unfold: `Δlive = Σ(restored members) − stub_removed + Σ(remnant stubs)` ->
-  positive = added.
+- fold: `freed = overlay_before − overlay_after` (positive = freed).
+- unfold: `restored = overlay_after − overlay_before` (positive = added).
 
 Rendering:
 
-- Head: `freed |Δlive|` (fold) / `restored |Δlive|` (unfold). Sign derived
-  from the value, so no double minus (fixes C).
-- Guard: fold with `Δlive >= 0` -> "no net saving (stub/summary >= hidden
-  content)" instead of a misleading "freed -N" (fixes C).
+- Head labels the absolute estimate by its actual direction (`freed`, `added`,
+  or no change), so no negative or double-negative saving is possible (fixes C).
+- A non-saving fold says that its stub/summary is at least as large as the
+  hidden content instead of claiming a saving (fixes C).
 - ctx line projected: `→ ctx ~37% (last 40%)` from
   `clamp0(last_tokens + Δlive) / window`; omitted when last usage is unknown.
   Honest that the measured usage lags, and reconciles by construction:
@@ -231,6 +230,18 @@ merge. Explicit `replaceSummary` text remains exact until a later overlap merge.
 
 The persisted `Span` shape is unchanged. Old snapshots remain readable, and no
 summary provenance or second memory hierarchy is introduced.
+
+### 13. Measure the overlay delta, including absorbed stubs
+
+Mutator accounting now estimates the complete overlay before and after a plan.
+This credits every visible stub removed when an existing fold is absorbed,
+makes an unchanged re-fold exactly zero, includes shorter or longer in-place
+summary replacements, and keeps whole-fold/unfold deltas symmetric. It also
+avoids maintaining a second hand-derived formula beside `buildOverlay`.
+
+These are chars/4 planning estimates aligned with pi's compaction estimator.
+The projected context percentage starts from the last provider-reported usage,
+which lags an in-turn mutation; neither value is an exact billed saving.
 
 ## Implementation mapping
 
