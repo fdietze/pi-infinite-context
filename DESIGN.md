@@ -204,6 +204,21 @@ guidelines were reduced to four (DRY), keeping concrete triggers and examples fo
 weaker models, and the categorical "maintain context at every phase boundary"
 becomes conditional on an actual saving.
 
+## Revision 3 — summary lifecycle
+
+### 11. Replace a visible summary without unfolding
+
+A `context_fold` item can opt into `replaceSummary: true`. In that mode `from`
+resolves the one existing fold containing that id, `summary` is required (an
+empty string clears it), and `to` is forbidden. Only the span's visible summary
+changes: its `fromId`, ordered `memberIds`, hidden messages, and original session
+entry ids remain untouched. Items in a batch apply in order. Without
+`replaceSummary`, range folding keeps its existing summary-merge behavior.
+
+Replacement is deliberately a mode of the existing mutator rather than another
+tool or summary-reading API. It edits the already-visible handoff in place and
+does not compete with `context_map`, `context_peek`, or `context_search`.
+
 ## Implementation mapping
 
 - **core.ts**: add `buildContextMap(msgs, spans)` (pure, returns ordered rows for

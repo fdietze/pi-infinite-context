@@ -358,14 +358,17 @@ export interface FoldItem {
   from: string;
   to?: string;
   summary?: string;
+  replaceSummary?: boolean;
 }
 
 export interface FoldPlan {
   spans: Span[]; // new span state (the input is left unchanged)
   applied: string[]; // fromIds of the resulting stubs (deduplicated)
+  replaced: string[]; // fold ids whose visible summary was replaced in place
   summaries: string[]; // summary per applied stub
   folded: number; // distinct folded messages
   unknown: string[]; // ids that could not be resolved
+  invalid: string[]; // malformed summary-replacement requests
   freedTokens: number; // net context tokens freed (live members - new stubs)
 }
 
@@ -397,9 +400,12 @@ export function stubTokens(summary: string, n: number, hidden: number): number {
  * Pure fold planning. Returns the new span state + report without mutating
  * the input. Multiple items that snap to the same tool unit (e.g. parallel tool
  * calls in ONE assistant turn) merge into one stub; non-empty summaries are
- * kept (an empty one never overwrites a real one). The report is derived from
- * the final state -> deduplicated and counted correctly no matter how many
- * items coincided.
+ * kept (an empty one never overwrites a real one). `replaceSummary` is the
+ * explicit exception: it addresses the one existing fold containing `from`
+ * and changes only that fold's visible summary (empty clears it). It requires a
+ * supplied `summary` and forbids `to`, so it can never hide a wider range by
+ * accident. Items apply in order. The report is derived from the final state ->
+ * deduplicated and counted correctly no matter how many items coincided.
  */
 export function planFold(
   msgs: BranchMsg[],
@@ -418,8 +424,26 @@ export function planFold(
   const priorMembers = new Set(spans.flatMap((s) => s.memberIds));
   const bounds = unitBounds(msgs);
   const unknown: string[] = [];
+  const invalid: string[] = [];
+  const replacementMembers = new Set<string>();
   const touched = new Set<string>();
   for (const item of items) {
+    if (item.replaceSummary) {
+      if (item.to !== undefined || item.summary === undefined) {
+        invalid.push(item.from);
+        continue;
+      }
+      const target = next.find(
+        (s) => s.fromId === item.from || s.memberIds.includes(item.from),
+      );
+      if (!target) {
+        unknown.push(item.from);
+        continue;
+      }
+      target.summary = item.summary;
+      replacementMembers.add(item.from);
+      continue;
+    }
     // Spans mutate per item -> rebuild the lookup each time.
     const spanByFrom = new Map(next.map((s) => [s.fromId, s] as const));
     const startIdx = (id: string) => {
@@ -462,6 +486,9 @@ export function planFold(
   const resultSpans = next.filter((s) =>
     s.memberIds.some((id) => touched.has(id)),
   );
+  const replacedSpans = next.filter((s) =>
+    s.memberIds.some((id) => replacementMembers.has(id)),
+  );
   // freed = newly-hidden live members minus the stub(s) that replace them.
   // Members folded by a prior span are excluded (already saved).
   let freedTokens = 0;
@@ -477,9 +504,11 @@ export function planFold(
   return {
     spans: next,
     applied: resultSpans.map((s) => s.fromId),
+    replaced: replacedSpans.map((s) => s.fromId),
     summaries: resultSpans.map((s) => s.summary),
     folded: touched.size,
     unknown,
+    invalid,
     freedTokens,
   };
 }

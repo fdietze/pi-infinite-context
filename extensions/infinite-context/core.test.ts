@@ -178,6 +178,51 @@ test("planFold: folding over an existing span absorbs it and inherits its summar
   assert.match(second.spans[0].summary, /outer/);
 });
 
+test("planFold: summary replacement and clearing preserve the fold and hidden ids", () => {
+  const msgs = branchMessages(fiveUserBranch());
+  const folded = planFold(msgs, [], [
+    { from: "u1", to: "u5", summary: "old handoff" },
+  ]);
+
+  const replaced = planFold(msgs, folded.spans, [
+    { from: "u3", summary: "new handoff", replaceSummary: true },
+  ]);
+  assert.deepEqual(replaced.replaced, ["u1"]);
+  assert.equal(replaced.folded, 0, "replacement does not re-fold messages");
+  assert.deepEqual(replaced.spans, [
+    {
+      fromId: "u1",
+      memberIds: ["u1", "u2", "u3", "u4", "u5"],
+      summary: "new handoff",
+    },
+  ]);
+  assert.equal(grep(msgs, replaced.spans, "old handoff").totalLines, 0);
+  assert.equal(grep(msgs, replaced.spans, "new handoff").totalLines, 1);
+  assert.match(serializeMessages(replaced.spans[0].memberIds, msgs), /\[#u5\]/);
+
+  const cleared = planFold(msgs, replaced.spans, [
+    { from: "u1", summary: "", replaceSummary: true },
+  ]);
+  assert.equal(cleared.spans[0].summary, "");
+  assert.deepEqual(cleared.spans[0].memberIds, folded.spans[0].memberIds);
+  assert.deepEqual(
+    planUnfold(msgs, cleared.spans, [{ from: "u1" }]).applied,
+    ["u1"],
+    "the original messages remain recoverable",
+  );
+});
+
+test("planFold: summary replacement rejects ranges and omitted summary text", () => {
+  const msgs = branchMessages(fiveUserBranch());
+  const folded = planFold(msgs, [], [{ from: "u1", to: "u5", summary: "s" }]);
+  const plan = planFold(msgs, folded.spans, [
+    { from: "u1", to: "u2", summary: "x", replaceSummary: true },
+    { from: "u1", replaceSummary: true },
+  ]);
+  assert.deepEqual(plan.invalid, ["u1", "u1"]);
+  assert.deepEqual(plan.spans, folded.spans);
+});
+
 test("planFold: input spans are not mutated (pure)", () => {
   const msgs = branchMessages(batchedReadBranch());
   const input: Span[] = [];

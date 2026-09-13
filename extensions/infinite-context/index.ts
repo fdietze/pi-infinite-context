@@ -135,6 +135,7 @@ interface MutateDetails {
   action: "fold" | "unfold";
   ok: boolean; // applied something
   msgs: number; // messages folded / restored
+  replacements: number; // summaries replaced in place (fold only)
   deltaTokens: number; // freed (fold) / restored (unfold)
   tail: string; // standing state line (folds · hidden · ctx)
   summaries: string[]; // fold digests (empty for unfold)
@@ -155,8 +156,19 @@ function renderMutate(
   const past = fold ? "folded" : "unfolded";
   const verb = fold ? "freed" : "restored";
   const color: ThemeColor = d.ok ? "success" : "warning";
+  const work = fold
+    ? [
+        d.msgs ? `folded ${plural(d.msgs, "msg")}` : "",
+        d.replacements
+          ? `replaced ${plural(d.replacements, "summary")}`
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : `unfolded ${plural(d.msgs, "msg")}`;
+  const amount = !fold || d.msgs ? ` · ${verb} ${tok(d.deltaTokens)}` : "";
   const head = d.ok
-    ? `${glyph} ${past} ${plural(d.msgs, "msg")} · ${verb} ${tok(d.deltaTokens)}`
+    ? `${glyph} ${work}${amount}`
     : `${glyph} nothing ${past} · ${d.failed.length} ${d.failLabel}`;
   if (!opts.expanded) return new Text(theme.fg(color, head), 0, 0);
   const lines = [theme.fg(color, head)];
@@ -338,7 +350,13 @@ export default function (pi: ExtensionAPI) {
         summary: Type.Optional(
           Type.String({
             description:
-              "Short digest kept visible in the stub. Omit to leave only a bare stub (for pure noise).",
+              "Short digest kept visible in the stub. Omit to leave only a bare stub (for pure noise). With replaceSummary, supply this field; an empty string clears the visible summary.",
+          }),
+        ),
+        replaceSummary: Type.Optional(
+          Type.Boolean({
+            description:
+              "Replace only the visible summary of the existing fold containing `from`. Preserves all hidden messages and ids; requires `summary` and forbids `to`. Items apply in order. Default false keeps range-fold merge behavior.",
           }),
         ),
       }),
@@ -356,7 +374,8 @@ export default function (pi: ExtensionAPI) {
       "Replace inclusive message ranges with reversible fold stubs. A supplied summary stays visible in the stub; " +
       "hidden messages remain available to context_search, context_peek, and context_unfold. If a range touches an " +
       "assistant turn that made tool calls, the whole turn and all its tool results fold together. Existing folds " +
-      "touched by a range are absorbed whole, joining their summaries.",
+      "touched by a range are absorbed whole, joining their summaries. Set replaceSummary on an item to replace " +
+      "or clear one existing fold's visible summary in place without changing its hidden messages.",
     promptSnippet:
       "Reversibly fold completed conversation history; use context_map for ids and context_search/context_peek/context_unfold to recover it",
     promptGuidelines: [
@@ -375,7 +394,7 @@ export default function (pi: ExtensionAPI) {
       }));
       const plan = planFold(msgs, spans, items);
       spans = plan.spans;
-      if (plan.folded) persist();
+      if (plan.folded || plan.replaced.length) persist();
       const usage = ctx.getContextUsage();
       const win = usage?.contextWindow ?? 0;
       const tail = overviewTail(spans, msgs);
@@ -383,27 +402,37 @@ export default function (pi: ExtensionAPI) {
       // positive magnitude. freedTokens <= 0 means the stub/summary is as big as
       // the hidden content: the fold still applied, but there is no net saving.
       const saved = plan.freedTokens > 0;
-      const head = plan.applied.length
-        ? `+ folded ${plural(plan.folded, "msg")} into ${plural(plan.applied.length, "fold")}: ${plan.applied.join(", ")}, ` +
-          (saved
-            ? `freed ${fmtTokens(plan.freedTokens)}${pctOf(-plan.freedTokens, win)}`
-            : "no net saving (stub/summary ≥ hidden content)") +
-          projectedCtx(usage, -plan.freedTokens) +
-          (plan.unknown.length
-            ? `. unknown id(s): ${plan.unknown.join(", ")}`
-            : "")
-        : `Folded nothing. unknown id(s): ${plan.unknown.join(", ")}`;
+      const actions = [
+        plan.applied.length
+          ? `folded ${plural(plan.folded, "msg")} into ${plural(plan.applied.length, "fold")}: ${plan.applied.join(", ")}, ` +
+            (saved
+              ? `freed ${fmtTokens(plan.freedTokens)}${pctOf(-plan.freedTokens, win)}`
+              : "no net saving (stub/summary ≥ hidden content)") +
+            projectedCtx(usage, -plan.freedTokens)
+          : "",
+        plan.replaced.length
+          ? `replaced ${plural(plan.replaced.length, "summary")} in place: ${plan.replaced.join(", ")}`
+          : "",
+      ].filter(Boolean);
+      const failures = [
+        plan.unknown.length ? `unknown id(s): ${plan.unknown.join(", ")}` : "",
+        plan.invalid.length
+          ? `invalid replacement(s), which require summary and forbid to: ${plan.invalid.join(", ")}`
+          : "",
+      ].filter(Boolean);
+      const head = `${actions.length ? `+ ${actions.join(". ")}` : "Folded nothing"}${failures.length ? `. ${failures.join(". ")}` : ""}`;
       return {
         content: [{ type: "text", text: `${head}\n${tail}` }],
         details: {
           action: "fold",
-          ok: plan.applied.length > 0,
+          ok: actions.length > 0,
           msgs: plan.folded,
+          replacements: plan.replaced.length,
           deltaTokens: plan.freedTokens,
           tail,
           summaries: plan.summaries.filter((s) => s),
-          failed: plan.unknown,
-          failLabel: "unknown",
+          failed: [...plan.unknown, ...plan.invalid],
+          failLabel: "unknown/invalid",
         } as MutateDetails,
       };
     },
@@ -477,6 +506,7 @@ export default function (pi: ExtensionAPI) {
           action: "unfold",
           ok: plan.applied.length > 0,
           msgs: plan.restoredMsgs,
+          replacements: 0,
           deltaTokens: plan.restoredTokens,
           tail,
           summaries: [],
