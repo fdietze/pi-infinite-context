@@ -46,9 +46,9 @@ export function nudgeBand(percent: number): number | null {
 // still fires; dropping below the base resets to 0 (re-arm). Pure so the one
 // bit of stateful logic stays under the test gate.
 //
-// The Map Is Not the Territory: `percent` derives from getContextUsage().tokens,
-// which is the last assistant usage and lags a just-made fold by one turn — the
-// re-arm is therefore one turn late, which is acceptable for a nudge.
+// The Map Is Not the Territory: `percent` derives from Pi's estimated context
+// usage. An in-turn overlay mutation and its generated response are not yet
+// reflected exactly, so threshold nudging remains deliberately approximate.
 export function planNudge(
   percent: number,
   lastBand: number,
@@ -112,10 +112,19 @@ export type BranchMsg = { id: string; message: AgentMessageLike };
 // (map/search/peek/fold); the stub itself carries no inline id. memberIds
 // are always real entry ids (flat), contiguous and ascending in branch order.
 // summary == "" -> a bare "(folded N)" stub; otherwise the summary is visible.
+// summaryFragments is optional persistence metadata: old writers/snapshots still
+// interoperate through summary alone, while new writers use fragment identity to
+// rejoin split copies without interpreting the caller's prose.
+export interface SummaryFragment {
+  id: string;
+  text: string;
+}
+
 export interface Span {
   fromId: string;
   memberIds: string[];
   summary: string;
+  summaryFragments?: SummaryFragment[];
 }
 
 /**
@@ -146,10 +155,10 @@ function contentChars(c: Content | undefined): number {
  * Byte-for-byte mirror of pi's estimateTokens (compaction.ts): per-role char
  * count / 4, rounded up. Mirrored instead of imported to keep the core free of
  * pi imports (testable in isolation) — exact counts are impossible anyway:
- * providers expose no portable per-message tokenizer, and pi itself plans
- * compaction with this same estimate plus the last reported assistant usage.
- * Matching pi's numbers is therefore the accuracy ceiling, and it keeps our
- * freed/hidden math consistent with pi's compaction thresholds.
+ * providers expose no portable per-message tokenizer, and Pi uses this same
+ * estimator in compaction planning. Matching Pi's message estimator is
+ * therefore the accuracy ceiling, and it
+ * keeps our freed/hidden math consistent with pi's compaction thresholds.
  */
 export function estimateTokens(message: AgentMessageLike): number {
   let chars = 0;
@@ -396,32 +405,135 @@ export function stubTokens(summary: string, n: number, hidden: number): number {
   });
 }
 
-// Fold merges have always joined summaries with `; `. Splitting a fold copies
-// that joined text to both remnants, so rejoining must treat those generated
-// clauses as an ordered set: otherwise every split/rejoin doubles the visible
-// summary. Clause-level dedup also handles a remnant extended after the split
-// ("S" + "S; detail") while preserving every distinct clause. Replacement is
-// separate and exact: replaceSummary never passes through this normalization.
-function mergeSummaries(summaries: Array<string | undefined>): string {
-  const seen = new Set<string>();
-  const merged: string[] = [];
-  for (const summary of summaries) {
-    for (const clause of summary?.split("; ") ?? []) {
-      if (!clause || seen.has(clause)) continue;
-      seen.add(clause);
-      merged.push(clause);
+// Caller text is opaque. `; ` is only the rendering separator between whole
+// independently-authored fragments; it is never parsed back out of their text.
+function renderSummary(fragments: SummaryFragment[]): string {
+  return fragments.map((fragment) => fragment.text).join("; ");
+}
+
+/**
+ * Clone and normalize fragment metadata for one mutation plan. Allocation is
+ * deliberately state-local: reserve every encountered string identity first,
+ * then issue the smallest unused sf:N id. That is enough to keep identities
+ * stable across persistence/reload and unique among surviving lineages without
+ * adding a global registry or counter to the snapshot format.
+ *
+ * A legacy nonempty summary becomes one opaque fragment. Invalid metadata,
+ * duplicate ids within one list, globally conflicting id/text pairs, or a
+ * rendered-text mismatch all take the same conservative path: preserve the
+ * exact stored summary as one newly identified fragment. Empty stays empty.
+ */
+function normalizeSummaryFragments(spans: Span[]): {
+  spans: Span[];
+  fresh: (text: string) => SummaryFragment | undefined;
+} {
+  const reserved = new Set<string>();
+  const textById = new Map<string, string>();
+  const conflicts = new Set<string>();
+
+  for (const span of spans) {
+    const fragments: unknown = span.summaryFragments;
+    const encountered = Array.isArray(fragments) ? fragments : [fragments];
+    for (const value of encountered) {
+      if (typeof value !== "object" || value === null) continue;
+      const fragment = value as { id?: unknown; text?: unknown };
+      if (typeof fragment.id !== "string") continue;
+      reserved.add(fragment.id);
+      if (
+        fragment.id.length === 0 ||
+        typeof fragment.text !== "string" ||
+        fragment.text.length === 0
+      ) {
+        conflicts.add(fragment.id);
+        continue;
+      }
+      const known = textById.get(fragment.id);
+      if (known !== undefined && known !== fragment.text)
+        conflicts.add(fragment.id);
+      else textById.set(fragment.id, fragment.text);
     }
   }
-  return merged.join("; ");
+
+  let nextId = 1;
+  const fresh = (text: string): SummaryFragment | undefined => {
+    if (text.length === 0) return undefined;
+    while (reserved.has(`sf:${nextId}`)) nextId++;
+    const fragment = { id: `sf:${nextId}`, text };
+    reserved.add(fragment.id);
+    nextId++;
+    return fragment;
+  };
+
+  const normalized = spans.map((span) => {
+    const raw: unknown = span.summaryFragments;
+    let fragments: SummaryFragment[] | undefined;
+    if (Array.isArray(raw)) {
+      const ids = new Set<string>();
+      const candidate: SummaryFragment[] = [];
+      let valid = true;
+      for (const value of raw) {
+        if (typeof value !== "object" || value === null) {
+          valid = false;
+          break;
+        }
+        const fragment = value as { id?: unknown; text?: unknown };
+        if (
+          typeof fragment.id !== "string" ||
+          fragment.id.length === 0 ||
+          typeof fragment.text !== "string" ||
+          fragment.text.length === 0 ||
+          ids.has(fragment.id) ||
+          conflicts.has(fragment.id)
+        ) {
+          valid = false;
+          break;
+        }
+        ids.add(fragment.id);
+        candidate.push({ id: fragment.id, text: fragment.text });
+      }
+      if (valid && renderSummary(candidate) === span.summary)
+        fragments = candidate;
+    }
+    if (fragments === undefined) {
+      const fragment = fresh(span.summary);
+      fragments = fragment ? [fragment] : [];
+    }
+    return {
+      ...span,
+      memberIds: span.memberIds.slice(),
+      summaryFragments: fragments,
+    };
+  });
+
+  return { spans: normalized, fresh };
+}
+
+// Rejoining split copies is an ordered union by identity. Equal text with
+// different identities is intentionally retained: independently-authored equal
+// handoffs are distinct information until the caller explicitly replaces them.
+function mergeSummaryFragments(
+  groups: Array<SummaryFragment[] | undefined>,
+): SummaryFragment[] {
+  const seen = new Set<string>();
+  const merged: SummaryFragment[] = [];
+  for (const fragments of groups) {
+    for (const fragment of fragments ?? []) {
+      if (seen.has(fragment.id)) continue;
+      seen.add(fragment.id);
+      merged.push({ ...fragment });
+    }
+  }
+  return merged;
 }
 
 /**
  * Pure fold planning. Returns the new span state + report without mutating
  * the input. Multiple items that snap to the same tool unit (e.g. parallel tool
  * calls in ONE assistant turn) merge into one stub; non-empty summaries are
- * kept (an empty one never overwrites a real one). `replaceSummary` is the
- * explicit exception: it addresses the one existing fold containing `from`
- * and changes only that fold's visible summary (empty clears it). It requires a
+ * kept as opaque, independently identified fragments (an empty one adds
+ * nothing). `replaceSummary` is the explicit exception: it addresses the one
+ * existing fold containing `from` and changes only that fold's visible summary
+ * (empty clears it). It requires a
  * supplied `summary` and forbids `to`, so it can never hide a wider range by
  * accident. Items apply in order. The report is derived from the final state ->
  * deduplicated and counted correctly no matter how many items coincided.
@@ -431,10 +543,8 @@ export function planFold(
   spans: Span[],
   items: FoldItem[],
 ): FoldPlan {
-  const next: Span[] = spans.map((s) => ({
-    ...s,
-    memberIds: s.memberIds.slice(),
-  }));
+  const normalized = normalizeSummaryFragments(spans);
+  const next = normalized.spans;
   const indexById = new Map(msgs.map((m, i) => [m.id, i] as const));
   const beforeTokens = estimateOverlayTokens(msgs, spans);
   const bounds = unitBounds(msgs);
@@ -456,6 +566,8 @@ export function planFold(
         continue;
       }
       target.summary = item.summary;
+      const fragment = normalized.fresh(item.summary);
+      target.summaryFragments = fragment ? [fragment] : [];
       replacementMembers.add(item.from);
       continue;
     }
@@ -484,16 +596,29 @@ export function planFold(
     );
     const memberIds = msgs.slice(lo, hi + 1).map((m) => m.id);
     const memberSet = new Set(memberIds);
-    // Absorb overlapping/coinciding spans; inherit their non-empty summaries.
-    const inherited: string[] = [];
-    for (let i = next.length - 1; i >= 0; i--) {
-      if (next[i].memberIds.some((id) => memberSet.has(id))) {
-        if (next[i].summary) inherited.unshift(next[i].summary);
-        next.splice(i, 1);
-      }
-    }
-    const summary = mergeSummaries([...inherited, item.summary]);
-    next.push({ fromId: memberIds[0], memberIds, summary });
+    // Absorb overlapping/coinciding spans in conversation order. Split copies
+    // share identities and collapse; independent equal text does not.
+    const inherited = next
+      .map((span, index) => ({ span, index }))
+      .filter(({ span }) => span.memberIds.some((id) => memberSet.has(id)))
+      .sort(
+        (a, b) =>
+          (indexById.get(a.span.memberIds[0]) ?? Number.MAX_SAFE_INTEGER) -
+          (indexById.get(b.span.memberIds[0]) ?? Number.MAX_SAFE_INTEGER),
+      );
+    for (const { index } of inherited.slice().sort((a, b) => b.index - a.index))
+      next.splice(index, 1);
+    const supplied = item.summary ? normalized.fresh(item.summary) : undefined;
+    const summaryFragments = mergeSummaryFragments([
+      ...inherited.map(({ span }) => span.summaryFragments),
+      supplied ? [supplied] : [],
+    ]);
+    next.push({
+      fromId: memberIds[0],
+      memberIds,
+      summary: renderSummary(summaryFragments),
+      summaryFragments,
+    });
     for (const id of memberIds) touched.add(id);
   }
   const resultSpans = next.filter((s) =>
@@ -537,18 +662,16 @@ export interface UnfoldPlan {
  * by search/peek). Uniform rule: omit `to` -> unfold the WHOLE fold; give `to`
  * -> the from..to sub-range SPLITS the fold - the sub-range is restored live,
  * the two leftover halves stay folded, both inheriting the original summary
- * (lossless). The sub-range is snapped to whole tool units and clamped within
- * the fold, so remnants never orphan a tool call/result pair.
+ * and fragment identities (lossless). The sub-range is snapped to whole tool
+ * units and clamped within the fold, so remnants never orphan a tool call/result
+ * pair.
  */
 export function planUnfold(
   msgs: BranchMsg[],
   spans: Span[],
   items: UnfoldItem[],
 ): UnfoldPlan {
-  const next: Span[] = spans.map((s) => ({
-    ...s,
-    memberIds: s.memberIds.slice(),
-  }));
+  const next = normalizeSummaryFragments(spans).spans;
   const indexById = new Map(msgs.map((m, i) => [m.id, i] as const));
   const beforeTokens = estimateOverlayTokens(msgs, spans);
   const bounds = unitBounds(msgs);
@@ -620,9 +743,23 @@ export function planUnfold(
     }
     next.splice(si, 1);
     if (left.length)
-      next.push({ fromId: left[0], memberIds: left, summary: span.summary });
+      next.push({
+        ...span,
+        fromId: left[0],
+        memberIds: left,
+        summaryFragments: span.summaryFragments?.map((fragment) => ({
+          ...fragment,
+        })),
+      });
     if (right.length)
-      next.push({ fromId: right[0], memberIds: right, summary: span.summary });
+      next.push({
+        ...span,
+        fromId: right[0],
+        memberIds: right,
+        summaryFragments: span.summaryFragments?.map((fragment) => ({
+          ...fragment,
+        })),
+      });
     applied.push(restored[0]);
     restoredMsgs += restored.length;
   }
@@ -651,7 +788,7 @@ export function reconcileSpans(
     }
     changed = true;
     if (memberIds.length === 0) continue;
-    out.push({ fromId: memberIds[0], memberIds, summary: s.summary });
+    out.push({ ...s, fromId: memberIds[0], memberIds });
   }
   return { spans: out, changed };
 }

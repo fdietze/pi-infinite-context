@@ -254,6 +254,7 @@ test("planFold: summary replacement and clearing preserve the fold and hidden id
       fromId: "u1",
       memberIds: ["u1", "u2", "u3", "u4", "u5"],
       summary: "new handoff",
+      summaryFragments: [{ id: "sf:2", text: "new handoff" }],
     },
   ]);
   assert.equal(grep(msgs, replaced.spans, "old handoff").totalLines, 0);
@@ -286,6 +287,141 @@ test("planFold: summary replacement rejects ranges and omitted summary text", ()
   ]);
   assert.deepEqual(plan.invalid, ["u1", "u1"]);
   assert.deepEqual(plan.spans, folded.spans);
+});
+
+test("planFold: caller summaries are opaque, including whitespace and delimiters", () => {
+  const msgs = branchMessages(fiveUserBranch());
+  for (const summary of [
+    "retry; retry",
+    'quoted "; " text; ',
+    "trailing; ",
+    "   ",
+    "",
+  ]) {
+    const span = planFold(msgs, [], [{ from: "u2", summary }]).spans[0];
+    assert.equal(span.summary, summary);
+    assert.deepEqual(
+      span.summaryFragments?.map((fragment) => fragment.text),
+      summary === "" ? [] : [summary],
+    );
+  }
+});
+
+test("planFold: independently authored equal summaries remain distinct", () => {
+  const msgs = branchMessages(fiveUserBranch());
+  const separate = planFold(msgs, [], [
+    { from: "u1", summary: "retry" },
+    { from: "u5", summary: "retry" },
+  ]);
+  const joined = planFold(msgs, separate.spans, [
+    { from: "u1", to: "u5" },
+  ]);
+  assert.equal(joined.spans[0].summary, "retry; retry");
+  assert.equal(new Set(joined.spans[0].summaryFragments?.map((f) => f.id)).size, 2);
+  assert.equal(
+    planFold(msgs, joined.spans, [{ from: "u1" }]).freedTokens,
+    0,
+    "an unchanged re-fold neither rewrites punctuation nor changes the overlay",
+  );
+});
+
+test("legacy summaries normalize before splitting; separate legacy spans stay distinct", () => {
+  const msgs = branchMessages(fiveUserBranch());
+  const legacy: Span[] = [
+    { fromId: "u1", memberIds: ["u1", "u2", "u3", "u4", "u5"], summary: "S" },
+  ];
+  const split = planUnfold(msgs, legacy, [{ from: "u3", to: "u3" }]);
+  const splitIds = split.spans.map((span) => span.summaryFragments?.[0]?.id);
+  assert.equal(splitIds[0], splitIds[1], "both remnants share the normalized lineage");
+  const rejoined = planFold(msgs, split.spans, [{ from: "u1", to: "u5" }]);
+  assert.equal(rejoined.spans[0].summary, "S");
+
+  const separateLegacy: Span[] = [
+    { fromId: "u1", memberIds: ["u1", "u2"], summary: "S" },
+    { fromId: "u4", memberIds: ["u4", "u5"], summary: "S" },
+  ];
+  const conservative = planFold(msgs, separateLegacy, [
+    { from: "u1", to: "u5" },
+  ]);
+  assert.equal(conservative.spans[0].summary, "S; S");
+  assert.equal(
+    new Set(conservative.spans[0].summaryFragments?.map((f) => f.id)).size,
+    2,
+  );
+  assert.deepEqual(legacy, [
+    { fromId: "u1", memberIds: ["u1", "u2", "u3", "u4", "u5"], summary: "S" },
+  ]);
+});
+
+test("invalid fragment metadata falls back to exact opaque summaries without collisions or mutation", () => {
+  const msgs = branchMessages(fiveUserBranch());
+  const mismatch: Span[] = [
+    {
+      fromId: "u1",
+      memberIds: ["u1", "u2"],
+      summary: "retry; retry",
+      summaryFragments: [{ id: "sf:1", text: "wrong" }],
+    },
+  ];
+  const mismatchBefore = structuredClone(mismatch);
+  const repaired = planFold(msgs, mismatch, [{ from: "u1" }]).spans[0];
+  assert.equal(repaired.summary, "retry; retry");
+  assert.deepEqual(repaired.summaryFragments, [
+    { id: "sf:2", text: "retry; retry" },
+  ]);
+  assert.deepEqual(mismatch, mismatchBefore);
+
+  const duplicate = planFold(
+    msgs,
+    [
+      {
+        fromId: "u1",
+        memberIds: ["u1", "u2"],
+        summary: "A; A",
+        summaryFragments: [
+          { id: "dup", text: "A" },
+          { id: "dup", text: "A" },
+        ],
+      },
+    ],
+    [{ from: "u1" }],
+  ).spans[0];
+  assert.deepEqual(duplicate.summaryFragments?.map((f) => f.text), ["A; A"]);
+
+  const malformed = planFold(
+    msgs,
+    [
+      {
+        fromId: "u1",
+        memberIds: ["u1", "u2"],
+        summary: "malformed; exact",
+        summaryFragments: { id: "sf:1" },
+      } as unknown as Span,
+    ],
+    [{ from: "u1" }],
+  ).spans[0];
+  assert.deepEqual(malformed.summaryFragments, [
+    { id: "sf:2", text: "malformed; exact" },
+  ]);
+
+  const conflicting: Span[] = [
+    {
+      fromId: "u1",
+      memberIds: ["u1", "u2"],
+      summary: "A",
+      summaryFragments: [{ id: "shared", text: "A" }],
+    },
+    {
+      fromId: "u4",
+      memberIds: ["u4", "u5"],
+      summary: "B",
+      summaryFragments: [{ id: "shared", text: "B" }],
+    },
+  ];
+  const joined = planFold(msgs, conflicting, [{ from: "u1", to: "u5" }]);
+  assert.equal(joined.spans[0].summary, "A; B");
+  assert.ok(joined.spans[0].summaryFragments?.every((f) => f.id !== "shared"));
+  assert.equal(new Set(joined.spans[0].summaryFragments?.map((f) => f.id)).size, 2);
 });
 
 test("planFold: input spans are not mutated (pure)", () => {
@@ -356,53 +492,96 @@ test("planUnfold: sub-range snaps to whole tool units (no orphaned pair)", () =>
   assert.deepEqual(remnants, ["A2", "u1"]);
 });
 
-test("split/rejoin round trips keep one copy of inherited and modified summary clauses", () => {
+test("asymmetric append/split/rejoin cycles preserve opaque summaries, grouping, ids, and snapshots", () => {
   const branch = fiveMessageToolPairBranch();
   const msgs = branchMessages(branch);
   const originalIds = msgs.map((m) => m.id);
-  let spans = planFold(msgs, [], [
-    { from: "u1", to: "u3", summary: "S" },
+  const beforeCompaction = branchMessages([
+    {
+      type: "message",
+      id: "old",
+      message: { role: "user", content: "compacted away", timestamp: 0 },
+    },
+    ...branch,
+  ]);
+  let spans = planFold(beforeCompaction, [], [
+    { from: "old", to: "u3", summary: "S; S" },
   ]).spans;
+  const compacted = reconcileSpans(spans, msgs);
+  assert.equal(compacted.changed, true);
+  spans = compacted.spans;
 
-  // A middle split copies S to both remnants. Extending one copy makes the two
-  // whole strings differ ("S; detail" vs "S"), so whole-string Set dedup is
-  // insufficient when the remnants rejoin.
   const split = planUnfold(msgs, spans, [{ from: "A", to: "R" }]);
   assert.deepEqual(split.applied, ["A"], "the whole tool pair moves together");
-  assert.deepEqual(split.spans.map((s) => s.summary), ["S", "S"]);
+  assert.deepEqual(split.spans.map((s) => s.summary), ["S; S", "S; S"]);
   const modified = planFold(msgs, split.spans, [
-    { from: "u1", summary: "S; detail", replaceSummary: true },
+    { from: "u1", summary: 'detail "; "; ' },
   ]);
   spans = planFold(msgs, modified.spans, [{ from: "u1", to: "u3" }]).spans;
-  assert.equal(spans[0].summary, "S; detail");
+  assert.equal(spans[0].summary, 'S; S; detail "; "; ');
 
-  const stableLength = spans[0].summary.length;
+  const stableSummary = spans[0].summary;
+  const stableFragments = spans[0].summaryFragments;
   for (let cycle = 0; cycle < 20; cycle++) {
-    const partial = planUnfold(msgs, spans, [{ from: "A", to: "R" }]);
+    spans = reconstructSpans([
+      {
+        type: "custom",
+        customType: "infinite-context",
+        data: { spans: structuredClone(spans) },
+      },
+    ]);
+    const reconciled = reconcileSpans(spans, msgs);
+    assert.equal(reconciled.changed, false);
+    const partial = planUnfold(msgs, reconciled.spans, [
+      { from: "A", to: "R" },
+    ]);
     assert.equal(partial.restoredMsgs, 2);
-    spans = planFold(msgs, partial.spans, [{ from: "u1", to: "u3" }]).spans;
-    assert.equal(spans[0].summary.length, stableLength, `cycle ${cycle + 1}`);
+    spans = planFold(msgs, partial.spans, [
+      { from: "u1", to: "u3" },
+    ]).spans;
+    assert.equal(spans[0].summary, stableSummary, `cycle ${cycle + 1}`);
+    assert.deepEqual(spans[0].summaryFragments, stableFragments);
   }
 
   assert.equal(spans.length, 1);
-  assert.equal(spans[0].summary, "S; detail");
   assert.deepEqual(spans[0].memberIds, originalIds);
   const hit = grep(msgs, spans, "tool output needle").hits[0];
   assert.deepEqual([hit.id, hit.foldFrom], ["R", "u1"]);
   assert.match(serializeMessages(spans[0].memberIds, msgs), /\[#R\]/);
-  assert.deepEqual(
-    reconstructSpans([
-      {
-        type: "custom",
-        customType: "infinite-context",
-        data: { spans },
-      },
-    ]),
-    spans,
-  );
   const restored = planUnfold(msgs, spans, [{ from: "u1" }]);
   assert.equal(restored.spans.length, 0);
-  assert.deepEqual(buildOverlay(messagesOf(branch), msgs, restored.spans), messagesOf(branch));
+  assert.deepEqual(
+    buildOverlay(messagesOf(branch), msgs, restored.spans),
+    messagesOf(branch),
+  );
+});
+
+test("replacement stays scoped to one remnant; merge-then-replace rewrites the combined handoff", () => {
+  const msgs = branchMessages(fiveUserBranch());
+  const folded = planFold(msgs, [], [
+    { from: "u1", to: "u5", summary: "S" },
+  ]);
+  const split = planUnfold(msgs, folded.spans, [
+    { from: "u3", to: "u3" },
+  ]);
+  const oneSibling = planFold(msgs, split.spans, [
+    { from: "u1", summary: "S; detail", replaceSummary: true },
+  ]);
+  const conservative = planFold(msgs, oneSibling.spans, [
+    { from: "u1", to: "u5" },
+  ]);
+  assert.equal(conservative.spans[0].summary, "S; detail; S");
+
+  const combined = planFold(msgs, split.spans, [
+    { from: "u1", to: "u5" },
+    { from: "u1", summary: "combined", replaceSummary: true },
+  ]);
+  assert.equal(combined.spans.length, 1);
+  assert.equal(combined.spans[0].summary, "combined");
+  assert.deepEqual(combined.spans[0].memberIds, msgs.map((m) => m.id));
+  assert.deepEqual(combined.spans[0].summaryFragments?.map((f) => f.text), [
+    "combined",
+  ]);
 });
 
 test("planUnfold: id matching no span is a noop", () => {
@@ -663,6 +842,29 @@ test("reconcileSpans preserves already-active spans without mutation", () => {
   assert.deepEqual(reconciled.spans, spans);
   assert.equal(reconciled.changed, false);
   assert.notEqual(reconciled.spans, spans);
+});
+
+test("reconcileSpans retains fragment metadata while native compaction prunes members", () => {
+  const all = branchMessages(fiveUserBranch());
+  const folded = planFold(all, [], [
+    { from: "u1", to: "u5", summary: "opaque; opaque" },
+  ]);
+  const active = all.slice(2);
+  const reconciled = reconcileSpans(folded.spans, active);
+  assert.equal(reconciled.changed, true);
+  assert.equal(reconciled.spans[0].fromId, "u3");
+  assert.deepEqual(
+    reconciled.spans[0].summaryFragments,
+    folded.spans[0].summaryFragments,
+  );
+  const roundTrip = reconstructSpans([
+    {
+      type: "custom",
+      customType: "infinite-context",
+      data: { spans: reconciled.spans },
+    },
+  ]);
+  assert.deepEqual(roundTrip, reconciled.spans);
 });
 
 test("branchMessages exposes every addressable active context entry", () => {
