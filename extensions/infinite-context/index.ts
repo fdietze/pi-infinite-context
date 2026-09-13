@@ -358,7 +358,7 @@ export default function (pi: ExtensionAPI) {
     },
     renderResult(result, opts, theme) {
       const d = result.details as
-        | { rows: MapRow[]; header: string; notes: string[] }
+        | { rows: MapRow[]; header: string; notes?: string[] }
         | undefined;
       if (!d) return new Text("", 0, 0);
       const head = `▤ ${d.header}`;
@@ -369,11 +369,13 @@ export default function (pi: ExtensionAPI) {
           theme.fg(
             "dim",
             r.kind === "fold"
-              ? `[#${r.id}] ⊟ ${plural(r.msgs, "msg")} · ${estTok(r.visibleTokens)} visible · ${estTok(r.tokens)} hidden · ${r.text}`
+              ? typeof r.visibleTokens === "number"
+                ? `[#${r.id}] ⊟ ${plural(r.msgs, "msg")} · ${estTok(r.visibleTokens)} visible · ${estTok(r.tokens)} hidden · ${r.text}`
+                : `[#${r.id}] ⊟ ${plural(r.msgs, "msg")} · ${tok(r.tokens)} hidden · ${r.text}`
               : `[#${r.id}] ${r.role} · ${estTok(r.tokens)} · ${r.text}`,
           ),
         ),
-        ...d.notes.map((note) => theme.fg("dim", note)),
+        ...(d.notes ?? []).map((note) => theme.fg("dim", note)),
       ];
       return new Text(lines.join("\n"), 0, 0);
     },
