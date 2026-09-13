@@ -684,6 +684,41 @@ export function summarizeTree(
  * The character cap survives the line window: a message can hold a single
  * 10k-char line, so lines alone do not bound the output.
  */
+export interface FoldSummarySelection {
+  text: string;
+  foldIds: string[];
+  missing: string[];
+}
+
+/** Resolve fold or member ids and print each current summary once, in full. */
+export function serializeFoldSummaries(
+  ids: string[],
+  spans: Span[],
+): FoldSummarySelection {
+  const seen = new Set<string>();
+  const foldIds: string[] = [];
+  const missing: string[] = [];
+  const blocks: string[] = [];
+  for (const id of ids) {
+    const span = spans.find(
+      (candidate) =>
+        candidate.fromId === id || candidate.memberIds.includes(id),
+    );
+    if (!span) {
+      missing.push(id);
+      continue;
+    }
+    if (seen.has(span.fromId)) continue;
+    seen.add(span.fromId);
+    foldIds.push(span.fromId);
+    const summary = span.summary || "(no summary)";
+    blocks.push(
+      `fold [#${span.fromId}] full current summary · ${span.summary.length} chars (~${fmtTokens(Math.ceil(span.summary.length / 4))} tok at chars/4):\n\n${summary}`,
+    );
+  }
+  return { text: blocks.join("\n\n———\n\n"), foldIds, missing };
+}
+
 export function serializeMessages(
   ids: string[],
   msgs: BranchMsg[],
@@ -885,13 +920,19 @@ export function reconstructSpans(branch: BranchEntry[]): Span[] {
   return spans;
 }
 
+export const CONTEXT_MAP_PREVIEW_CHARS = 60;
+export const CONTEXT_MAP_DEFAULT_LIMIT = 50;
+export const CONTEXT_MAP_MAX_LIMIT = 200;
+
 export interface MapRow {
   id: string; // live: message id; fold: span fromId
   kind: "live" | "fold";
   role: string; // message role, or "fold"
-  tokens: number; // live: message tokens; fold: hidden member tokens
+  tokens: number; // live: message tokens; fold: represented hidden member tokens
+  visibleTokens: number; // live: same as tokens; fold: rendered stub tokens
   msgs: number; // live: 1; fold: member count
-  text: string; // live: snippet; fold: summary or "(no summary)"
+  text: string; // bounded live snippet or fold-summary preview
+  truncated: boolean;
 }
 
 /**
@@ -903,7 +944,7 @@ export interface MapRow {
 export function buildContextMap(
   msgs: BranchMsg[],
   spans: Span[],
-  snippetLen = 60,
+  snippetLen = CONTEXT_MAP_PREVIEW_CHARS,
 ): MapRow[] {
   const spanByFrom = new Map(spans.map((s) => [s.fromId, s] as const));
   const tokById = new Map(
@@ -915,7 +956,10 @@ export function buildContextMap(
     for (const id of s.memberIds.slice(1)) hiddenMembers.add(id);
   const snip = (s: string) => {
     const one = s.replace(/\s+/g, " ").trim();
-    return one.length > snippetLen ? `${one.slice(0, snippetLen)}…` : one;
+    return {
+      text: one.length > snippetLen ? `${one.slice(0, snippetLen)}…` : one,
+      truncated: one.length > snippetLen,
+    };
   };
   const rows: MapRow[] = [];
   for (const { id, message } of msgs) {
@@ -926,26 +970,61 @@ export function buildContextMap(
         (t, m) => t + (tokById.get(m) ?? 0),
         0,
       );
+      const preview = span.summary
+        ? snip(span.summary)
+        : { text: "(no summary)", truncated: false };
       rows.push({
         id,
         kind: "fold",
         role: "fold",
         tokens,
+        visibleTokens: stubTokens(span.summary, span.memberIds.length, tokens),
         msgs: span.memberIds.length,
-        text: span.summary || "(no summary)",
+        ...preview,
       });
       continue;
     }
+    const tokens = estimateTokens(message);
     rows.push({
       id,
       kind: "live",
       role: message.role,
-      tokens: estimateTokens(message),
+      tokens,
+      visibleTokens: tokens,
       msgs: 1,
-      text: snip(serializeContent(message)),
+      ...snip(serializeContent(message)),
     });
   }
   return rows;
+}
+
+export interface ContextMapPage {
+  rows: MapRow[];
+  totalRows: number;
+  offset: number;
+  limit: number;
+  nextOffset: number | null;
+}
+
+/** Return one validated, conventional offset/limit page of map rows. */
+export function paginateContextMap(
+  rows: MapRow[],
+  offset = 0,
+  limit = CONTEXT_MAP_DEFAULT_LIMIT,
+): ContextMapPage {
+  if (!Number.isSafeInteger(offset) || offset < 0)
+    throw new RangeError("offset must be a non-negative safe integer");
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > CONTEXT_MAP_MAX_LIMIT)
+    throw new RangeError(`limit must be between 1 and ${CONTEXT_MAP_MAX_LIMIT}`);
+  const page = rows.slice(offset, offset + limit);
+  const next = offset + page.length;
+  return {
+    rows: page,
+    totalRows: rows.length,
+    offset,
+    limit,
+    nextOffset: next < rows.length ? next : null,
+  };
 }
 
 /**

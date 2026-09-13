@@ -7,8 +7,11 @@ import {
   branchMessages,
   buildContextMap,
   buildOverlay,
+  CONTEXT_MAP_DEFAULT_LIMIT,
+  CONTEXT_MAP_MAX_LIMIT,
   estimateTokens,
   fmtTokens,
+  paginateContextMap,
   planFold,
   planUnfold,
   planNudge,
@@ -16,6 +19,7 @@ import {
   reconstructSpans,
   searchMessages,
   compileSearchPattern,
+  serializeFoldSummaries,
   serializeMessages,
   stubTokens,
   summarizeTree,
@@ -321,6 +325,20 @@ test("serializeMessages: an offset past the last line says so instead of printin
 test("serializeMessages: ids that are not active messages are skipped", () => {
   const msgs = branchMessages(fiveUserBranch());
   assert.match(serializeMessages(["gone", "u1"], msgs), /^\[#u1\] user/);
+});
+
+test("serializeFoldSummaries: member ids resolve once and return the full huge summary", () => {
+  const summary = "summary ".repeat(12_000);
+  const span: Span = {
+    fromId: "u1",
+    memberIds: ["u1", "u2"],
+    summary,
+  };
+  const selected = serializeFoldSummaries(["u2", "u1", "missing"], [span]);
+  assert.deepEqual(selected.foldIds, ["u1"]);
+  assert.deepEqual(selected.missing, ["missing"]);
+  assert.equal(selected.text.split("\n\n").at(-1), summary);
+  assert.doesNotMatch(selected.text, /…/);
 });
 
 // The search -> peek pipe only works if both count lines over the same text.
@@ -667,8 +685,54 @@ test("buildContextMap: fold with empty summary -> (no summary) label; snippet is
   assert.equal(rows[0].id, "big");
   assert.ok(rows[0].text.endsWith("…"), "long snippet is truncated with an ellipsis");
   assert.ok(rows[0].text.length <= 61);
+  assert.equal(rows[0].truncated, true);
   const fold = rows.find((r) => r.kind === "fold")!;
   assert.equal(fold.text, "(no summary)");
+  assert.equal(fold.truncated, false);
+});
+
+test("buildContextMap: huge fold summaries are previewed but their full visible cost is reported", () => {
+  ts = 0;
+  const msgs = branchMessages([userE("u1", "one"), userE("u2", "two")]);
+  const summary = "digest ".repeat(20_000);
+  const span: Span = { fromId: "u1", memberIds: ["u1", "u2"], summary };
+  const [row] = buildContextMap(msgs, [span]);
+  assert.equal(row.kind, "fold");
+  assert.equal(row.truncated, true);
+  assert.ok(row.text.endsWith("…"));
+  assert.ok(row.text.length <= 61);
+  assert.equal(row.visibleTokens, stubTokens(summary, 2, row.tokens));
+  assert.ok(row.visibleTokens > row.tokens);
+});
+
+test("paginateContextMap: defaults bound many rows and expose a stable continuation", () => {
+  ts = 0;
+  const branch = Array.from({ length: 125 }, (_, i) =>
+    userE(`m${i}`, `message ${i}`),
+  );
+  const rows = buildContextMap(branchMessages(branch), []);
+  const first = paginateContextMap(rows);
+  assert.equal(first.rows.length, CONTEXT_MAP_DEFAULT_LIMIT);
+  assert.equal(first.totalRows, 125);
+  assert.equal(first.offset, 0);
+  assert.equal(first.nextOffset, CONTEXT_MAP_DEFAULT_LIMIT);
+  assert.equal(first.rows[0].id, "m0");
+
+  const last = paginateContextMap(rows, 100, CONTEXT_MAP_DEFAULT_LIMIT);
+  assert.equal(last.rows.length, 25);
+  assert.equal(last.rows[0].id, "m100");
+  assert.equal(last.nextOffset, null);
+});
+
+test("paginateContextMap: rejects invalid caller-controlled bounds", () => {
+  const rows = buildContextMap(branchMessages(fiveUserBranch()), []);
+  assert.throws(() => paginateContextMap(rows, -1), /offset/);
+  assert.throws(() => paginateContextMap(rows, 0.5), /offset/);
+  assert.throws(() => paginateContextMap(rows, 0, 0), /limit/);
+  assert.throws(
+    () => paginateContextMap(rows, 0, CONTEXT_MAP_MAX_LIMIT + 1),
+    /limit/,
+  );
 });
 
 // --- planNudge (context-fill nudge policy) ---------------------------------
