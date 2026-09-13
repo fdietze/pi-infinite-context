@@ -14,7 +14,7 @@ shell), `core.ts` (functional core), `core.test.ts` (node:test).
 ## Goal
 
 Five crystal-clear, single-purpose tools the agent can reason about at a glance,
-a whole-context "map" to plan batch folds from, and result numbers it can
+a bounded, paged context map to plan batch folds from, and result numbers it can
 trust and cross-check.
 
 ## Initial constraints
@@ -56,20 +56,27 @@ a `summary` field), worsens inference reliability (provider tool-choice is tuned
 for one tool = one param shape), and hides the ops. The real token lever is
 deduping the shared preamble (change 4), not merging.
 
-### 2. `context_map` — the orientation call (no args)
+### 2. `context_map` — the bounded orientation call
 
-Lists the entire current context in conversation order:
+Lists the current context in conversation order, with optional zero-based
+`offset` and bounded `limit` pagination (defaults to 50 rows, maximum 200):
 
-- live message -> `[#id] role · <tokens> · <~60-char snippet>`
-- fold -> `[#id] ⊟ <n> msgs · <hidden> hidden · <summary>`
+- live message -> `[#id] role · <estimated tokens> · <~60-char snippet>`
+- fold -> `[#id] ⊟ <n> msgs · <visible stub estimate> · <hidden-history estimate> · <~60-char summary preview>`
 
-Header: `folds: N · Xk hidden · ctx <fill>`.
+The header reports total rows, the shown range, fold totals, aggregate visible
+stub and represented hidden-history estimates, and context fill from the last
+provider usage. Estimates are explicitly chars/4; they are not tokenizer-exact.
+A continuation line gives the next offset, and truncated fold previews point to
+`context_peek`'s targeted full-summary mode.
 
-Replaces peek's former no-arg overview. The model takes one `context_map`, spots
-the fat or finished chunks, then batches several ranges into one
-`context_fold`. Backed by a pure core fn `buildContextMap(msgs, spans)`
-(tested); `index.ts` wires it. It complements, not duplicates, `context_search`:
-map = orientation without prior knowledge; search = grep by regex.
+Replaces peek's former no-arg overview. The model takes one or more
+`context_map` pages, spots the fat or finished chunks, then batches several
+ranges into one `context_fold`. Backed by pure core functions
+`buildContextMap(msgs, spans)` and `paginateContextMap(rows, offset, limit)`
+(tested); `index.ts` wires them. It complements, not duplicates,
+`context_search`: map = orientation without prior knowledge; search = grep by
+regex.
 
 ### 3. Uniform batching — no union / overloaded params
 
@@ -80,11 +87,15 @@ Every read/write tool takes an array; no optional-single or overloaded params.
   (-> `context_map`). An optional `offset` switches the unit of the read from
   the fold to the message: only the named messages are printed, starting at that
   line (the line numbers `context_search` reports), so a hit deep inside a long
-  message is reachable without dumping its fold siblings. This is the one
-  deliberate exception to the rule below: `offset` shifts what `ids` addresses,
-  because expanding a fold is discovery (member ids cannot be named before they
-  are seen) while windowing is a targeted read — cheaper than a separate `unit`
-  knob that would let both be requested at once.
+  message is reachable without dumping its fold siblings. `summaryOnly: true`
+  instead prints each addressed fold's complete current summary once, without
+  unfolding or dumping its members; it cannot be combined with `offset`. This
+  keeps the default map bounded while preserving explicit lossless access to a
+  long summary. The offset behavior is the one deliberate exception to the rule
+  below: `offset` shifts what `ids` addresses, because expanding a fold is
+  discovery (member ids cannot be named before they are seen) while windowing is
+  a targeted read — cheaper than a separate `unit` knob that would let both be
+  requested at once.
 - `context_search`: `patterns: string[]` — each regex returns its own hit group.
 - `context_fold` / `context_unfold`: keep `items: [...]`.
 
@@ -206,8 +217,10 @@ becomes conditional on an actual saving.
 
 ## Implementation mapping
 
-- **core.ts**: add `buildContextMap(msgs, spans)` (pure, returns ordered rows for
-  live msgs + folds). Change `planUnfold` to return net `restoredTokens`
+- **core.ts**: `buildContextMap(msgs, spans)` returns ordered rows for live
+  messages and folds with bounded previews and separate visible/hidden costs;
+  `paginateContextMap` validates and pages those rows; `serializeFoldSummaries`
+  provides targeted, complete summary reads. Change `planUnfold` to return net `restoredTokens`
   (`Δlive`) alongside `restoredMsgs`. Keep `planFold.freedTokens` (already
   net); expose it unchanged. `searchMessages`/`serializeSpan` already return
   array-friendly data for batched callers.
@@ -216,8 +229,8 @@ becomes conditional on an actual saving.
   (`|Δ|`, projected ctx, non-saving guard, value-derived sign); move the shared
   preamble into the consolidated `promptGuidelines`.
 - **core.test.ts**: update unfold assertions to the net `restoredTokens`
-  semantics; add a `buildContextMap` test; add batched `peek(ids)` /
-  `search(patterns)` shape tests.
+  semantics; cover bounded map previews, pagination/bound validation and full
+  summary retrieval; add batched `peek(ids)` / `search(patterns)` shape tests.
 
 ## Verification
 

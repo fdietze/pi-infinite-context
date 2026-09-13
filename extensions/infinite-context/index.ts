@@ -63,9 +63,12 @@ import {
   INFINITE_CONTEXT_ENTRY,
   branchMessages,
   buildContextMap,
+  CONTEXT_MAP_DEFAULT_LIMIT,
+  CONTEXT_MAP_MAX_LIMIT,
   type MapRow,
   buildOverlay,
   fmtTokens,
+  paginateContextMap,
   planFold,
   planUnfold,
   planNudge,
@@ -77,6 +80,7 @@ import {
   reconcileSpans,
   reconstructSpans,
   searchMessages,
+  serializeFoldSummaries,
   serializeMessages,
   summarizeTree,
 } from "./core.ts";
@@ -91,11 +95,12 @@ const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
 // All numeric sizes in this extension are TOKEN estimates (chars/4). The `tok`
 // suffix disambiguates them from the `msgs` count on the same preview line.
 const tok = (n: number) => `${fmtTokens(n)} tok`;
+const estTok = (n: number) => `${fmtTokens(n)} tok est`;
 
-// Context fill as "20% (202.5k/1000k)", or "" when unknown.
+// Last-provider context fill as "20% (202.5k/1000k tok)", or "" when unknown.
 function ctxFill(contextWindow: number, contextTokens: number | null): string {
   return contextWindow > 0 && contextTokens != null
-    ? `${Math.round((contextTokens / contextWindow) * 100)}% (${fmtTokens(contextTokens)}/${fmtTokens(contextWindow)})`
+    ? `${Math.round((contextTokens / contextWindow) * 100)}% (${fmtTokens(contextTokens)}/${fmtTokens(contextWindow)} tok)`
     : "";
 }
 
@@ -131,6 +136,13 @@ function pctOf(deltaTokens: number, contextWindow: number): string {
 }
 
 // Shared TUI detail for the two inverse mutators (fold/unfold).
+interface PeekDetails {
+  folds: number;
+  members: number;
+  missing: string[];
+  summaryOnly: boolean;
+}
+
 interface MutateDetails {
   action: "fold" | "unfold";
   ok: boolean; // applied something
@@ -274,33 +286,79 @@ export default function (pi: ExtensionAPI) {
     name: "context_map",
     label: "Context map",
     description:
-      "Index your active conversation context in order. Live rows show [#id] · role · estimated tokens · snippet; " +
-      "fold rows show [#id] · hidden size · summary. The header totals it up and adds context fill from the last " +
-      "reported usage. All token numbers are chars/4 estimates. No arguments.",
-    parameters: Type.Object({}),
-    async execute(_id, _params, _signal, _onUpdate, ctx) {
+      "Index the active conversation in order. Live rows show id, role, chars/4 token estimate, and a short snippet; " +
+      "fold rows distinguish the estimated visible stub cost from represented hidden-history cost and show a bounded " +
+      `summary preview. Results use offset/limit pagination (defaults: offset 0, limit ${CONTEXT_MAP_DEFAULT_LIMIT}; max ${CONTEXT_MAP_MAX_LIMIT}). ` +
+      "The header reports totals and labels context fill as last-provider usage.",
+    parameters: Type.Object({
+      offset: Type.Optional(
+        Type.Integer({
+          minimum: 0,
+          maximum: Number.MAX_SAFE_INTEGER,
+          description: "Zero-based row offset. Defaults to 0.",
+        }),
+      ),
+      limit: Type.Optional(
+        Type.Integer({
+          minimum: 1,
+          maximum: CONTEXT_MAP_MAX_LIMIT,
+          description: `Rows to return. Defaults to ${CONTEXT_MAP_DEFAULT_LIMIT}; maximum ${CONTEXT_MAP_MAX_LIMIT}.`,
+        }),
+      ),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
       const msgs = reconcile(activeMsgs(ctx));
-      const rows = buildContextMap(msgs, spans);
+      const allRows = buildContextMap(msgs, spans);
+      const page = paginateContextMap(allRows, params.offset, params.limit);
       const usage = ctx.getContextUsage();
       const { totalSpans, hiddenTokens } = summarizeTree(spans, msgs);
-      const fill = ctxFill(usage?.contextWindow ?? 0, usage?.tokens ?? null);
-      const header = `${rows.length} rows · folds: ${totalSpans} · ${tok(hiddenTokens)} hidden${fill ? ` · ctx ${fill}` : ""}`;
-      const lines = rows.map((r) =>
-        r.kind === "fold"
-          ? `[#${r.id}] ⊟ ${plural(r.msgs, "msg")} · ${tok(r.tokens)} hidden · ${r.text}`
-          : `[#${r.id}] ${r.role} · ${tok(r.tokens)} · ${r.text}`,
+      const visibleStubTokens = allRows.reduce(
+        (total, row) =>
+          total + (row.kind === "fold" ? row.visibleTokens : 0),
+        0,
       );
-      const text = rows.length
-        ? `${header}\n${lines.join("\n")}`
-        : "Context is empty.";
+      const fill = ctxFill(usage?.contextWindow ?? 0, usage?.tokens ?? null);
+      const shown = page.rows.length
+        ? `showing ${page.offset + 1}-${page.offset + page.rows.length}`
+        : page.totalRows
+          ? `showing none from offset ${page.offset}`
+          : "showing none";
+      const header =
+        `${page.totalRows} rows total · ${shown} · folds: ${totalSpans}` +
+        ` · ${estTok(visibleStubTokens)} visible fold stubs` +
+        ` · ${estTok(hiddenTokens)} represented hidden history` +
+        (fill ? ` · last-provider ctx ${fill}` : "");
+      const lines = page.rows.map((r) =>
+        r.kind === "fold"
+          ? `[#${r.id}] ⊟ ${plural(r.msgs, "msg")} · ${estTok(r.visibleTokens)} visible stub · ${estTok(r.tokens)} hidden history · ${r.text}`
+          : `[#${r.id}] ${r.role} · ${estTok(r.tokens)} · ${r.text}`,
+      );
+      const notes = [
+        page.nextOffset === null
+          ? ""
+          : `More rows: call context_map with offset=${page.nextOffset} and limit=${page.limit}.`,
+        page.rows.some((row) => row.kind === "fold" && row.truncated)
+          ? "Fold summaries ending in … are previews; use context_peek with summaryOnly=true and that fold id for the full current summary."
+          : "",
+      ].filter(Boolean);
+      const body = lines.length
+        ? lines.join("\n")
+        : page.totalRows
+          ? `No rows at offset ${page.offset}.`
+          : "Context is empty.";
+      const text = [header, body, ...notes].join("\n");
       return {
         content: [{ type: "text", text }],
-        details: { rows, header } as { rows: MapRow[]; header: string },
+        details: { rows: page.rows, header, notes } as {
+          rows: MapRow[];
+          header: string;
+          notes: string[];
+        },
       };
     },
     renderResult(result, opts, theme) {
       const d = result.details as
-        | { rows: MapRow[]; header: string }
+        | { rows: MapRow[]; header: string; notes: string[] }
         | undefined;
       if (!d) return new Text("", 0, 0);
       const head = `▤ ${d.header}`;
@@ -311,10 +369,11 @@ export default function (pi: ExtensionAPI) {
           theme.fg(
             "dim",
             r.kind === "fold"
-              ? `[#${r.id}] ⊟ ${plural(r.msgs, "msg")} · ${tok(r.tokens)} · ${r.text}`
-              : `[#${r.id}] ${r.role} · ${tok(r.tokens)} · ${r.text}`,
+              ? `[#${r.id}] ⊟ ${plural(r.msgs, "msg")} · ${estTok(r.visibleTokens)} visible · ${estTok(r.tokens)} hidden · ${r.text}`
+              : `[#${r.id}] ${r.role} · ${estTok(r.tokens)} · ${r.text}`,
           ),
         ),
+        ...d.notes.map((note) => theme.fg("dim", note)),
       ];
       return new Text(lines.join("\n"), 0, 0);
     },
@@ -511,18 +570,50 @@ export default function (pi: ExtensionAPI) {
           "First line to print. Given, only the messages named in `ids` are printed, not their whole fold. Line numbers are the ones context_search reports.",
       }),
     ),
+    summaryOnly: Type.Optional(
+      Type.Boolean({
+        description:
+          "Print each addressed fold's full current summary instead of hidden messages. Cannot be combined with `offset`.",
+      }),
+    ),
   });
 
   pi.registerTool({
     name: "context_peek",
     label: "Context peek",
     description:
-      "Read folded messages without unfolding them. Prints each hidden message's id, role, estimated tokens and " +
-      "text, capped at about 2000 characters PER message. Use `offset` to read further down a long message, at " +
-      "the line numbers context_search reports.",
+      "Read folds without unfolding them. By default, prints hidden messages with ids, roles, chars/4 token estimates, " +
+      "and about 2000 characters per message; use `offset` with context_search line numbers to continue. Set " +
+      "`summaryOnly` to print the full current summaries for only the addressed folds.",
     parameters: PeekParam,
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const msgs = reconcile(activeMsgs(ctx));
+      if (params.summaryOnly && params.offset !== undefined)
+        throw new Error("summaryOnly cannot be combined with offset");
+      if (params.summaryOnly) {
+        const selected = serializeFoldSummaries(
+          params.ids.map(bareId),
+          spans,
+        );
+        const text =
+          [
+            selected.text,
+            selected.missing.length
+              ? `no fold for: ${selected.missing.join(", ")}`
+              : "",
+          ]
+            .filter(Boolean)
+            .join("\n\n") || "No folds for those ids.";
+        return {
+          content: [{ type: "text", text }],
+          details: {
+            folds: selected.foldIds.length,
+            members: 0,
+            missing: selected.missing,
+            summaryOnly: true,
+          } as PeekDetails,
+        };
+      }
       // An offset addresses a MESSAGE, so it selects one: a fold-level read has
       // no meaningful offset, and printing every sibling of a fat fold defeats
       // the windowed read the caller asked for. Without an offset the unit is
@@ -566,21 +657,22 @@ export default function (pi: ExtensionAPI) {
           .join("\n\n") || "No folds for those ids.";
       return {
         content: [{ type: "text", text }],
-        details: { folds: folds.size, members, missing } as {
-          folds: number;
-          members: number;
-          missing: string[];
-        },
+        details: {
+          folds: folds.size,
+          members,
+          missing,
+          summaryOnly: false,
+        } as PeekDetails,
       };
     },
     renderResult(result, opts, theme) {
-      const d = result.details as
-        | { folds: number; members: number; missing: string[] }
-        | undefined;
+      const d = result.details as PeekDetails | undefined;
       if (!d) return new Text("", 0, 0);
       if (!d.folds)
         return new Text(theme.fg("warning", "◈ no folds for those ids"), 0, 0);
-      const head = `◈ ${plural(d.folds, "fold")} · ${plural(d.members, "member")}`;
+      const head = d.summaryOnly
+        ? `◈ full ${plural(d.folds, "summary")}`
+        : `◈ ${plural(d.folds, "fold")} · ${plural(d.members, "member")}`;
       if (!opts.expanded) return new Text(theme.fg("accent", head), 0, 0);
       const lines = [theme.fg("accent", head)];
       if (d.missing.length)
