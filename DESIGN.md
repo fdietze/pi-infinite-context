@@ -27,11 +27,10 @@ trust and cross-check.
   `promptGuidelines`). `peek`/`search`/`unfold` carry only a `description`.
   Search is mentioned only indirectly, inside fold's recovery guideline.
 - Reported-number bugs (all confirmed in code):
-  - **A — `ctx %` lags the action.** `getContextUsage().tokens` is derived from
-    the last assistant `usage` (`calculateContextTokens` in `agent-session.js`).
-    Within a turn, a just-made fold only takes effect on the next `context`
-    build, so `ctx %` is unchanged while `freed` is a prediction. They do not
-    reconcile until the next LLM response.
+  - **A — `ctx %` lags the action.** `getContextUsage().tokens` is Pi's
+    estimated active-context baseline. Within a turn, a just-made fold and the
+    response being generated are not yet represented exactly, so an unchanged
+    `ctx %` beside a predicted `freed` amount is misleading.
   - **B — asymmetric definitions.** `fold.freedTokens` is *net*
     (`Σ(live − stub)`, excludes already-folded members); `unfold.restoredTokens`
     is *gross* (`Σ member tokens`, ignores the removed stub and remnant stubs).
@@ -113,10 +112,11 @@ Rendering:
   or no change), so no negative or double-negative saving is possible (fixes C).
 - A non-saving fold says that its stub/summary is at least as large as the
   hidden content instead of claiming a saving (fixes C).
-- ctx line projected: `→ ctx ~37% (last 40%)` from
-  `clamp0(last_tokens + Δlive) / window`; omitted when last usage is unknown.
-  Honest that the measured usage lags, and reconciles by construction:
-  `before − freed = projected` (fixes A). Symmetric definition fixes B.
+- ctx line is explicitly a mutation-only projection from
+  `clamp0(pi_estimated_baseline + Δlive) / window`; omitted when the baseline is
+  unknown. It says that the response being generated is excluded. The overlay
+  delta reconciles by construction; the result is not an exact billing count
+  (fixes A). Symmetric definition fixes B.
 
 ### 6. Drop live-message prefixes (ids come from the map)
 
@@ -179,10 +179,9 @@ actually in.
 
 ### 8. Exact-as-possible token numbers
 
-Exact per-message counts are not obtainable: providers report only whole-request
-totals after the fact and expose no portable tokenizer; pi itself plans
-compaction from this same estimate plus the last assistant usage. So the ceiling
-is *agreeing with pi*: `estimateTokens` now mirrors pi's `estimateTokens`
+Exact per-message counts are not obtainable: providers expose no portable
+per-message tokenizer, while Pi's context planning uses estimates. So the
+ceiling is *agreeing with pi*: `estimateTokens` now mirrors pi's `estimateTokens`
 byte-for-byte (per-role chars/4, images at the flat `ESTIMATED_IMAGE_CHARS =
 4800`, bash command+output, summary text). `stubTokens` measures exactly the
 stub text the overlay emits, so a fold's net saving is not overstated.
@@ -218,18 +217,24 @@ Replacement is deliberately a mode of the existing mutator rather than another
 tool or summary-reading API. It edits the already-visible handoff in place and
 does not compete with `context_map`, `context_peek`, or `context_search`.
 
-### 12. Rejoin copied summaries without amplification
+### 12. Rejoin copied summaries without interpreting prose
 
-Partial unfold still copies the original summary to both remainder folds, so
-each remainder remains independently intelligible and no information is lost.
-When folds overlap again, `context_fold` merges their semicolon-separated
-summary clauses as an ordered set. Thus `S` plus `S` stays `S`, and a modified
-overlap such as `S; detail` plus `S` stays `S; detail`; distinct clauses retain
-first-seen order. This also repairs already-amplified summaries on their next
-merge. Explicit `replaceSummary` text remains exact until a later overlap merge.
+Caller-provided summary text is opaque. Each nonempty fold contribution has a
+small internal `{id, text}` fragment; `summary` remains the compatibility and
+model-facing rendering. Partial unfold copies fragment identities to both
+remnants, and overlap rejoin performs an ordered union by identity. Shared split
+lineages therefore do not amplify, while independently authored equal text
+remains distinct. `; ` only joins whole fragments and is never parsed from
+caller text. Replacement resets only its addressed fold to one fresh fragment
+(or none when cleared).
 
-The persisted `Span` shape is unchanged. Old snapshots remain readable, and no
-summary provenance or second memory hierarchy is introduced.
+`summaryFragments` is optional on persisted spans. Legacy nonempty summaries
+normalize lazily to one opaque fragment before a mutation; separate legacy spans
+remain separate because ancestry cannot be inferred. Invalid, conflicting, or
+summary-mismatched metadata conservatively falls back to the exact stored
+summary. No read or bulk migration writes metadata merely because it is absent;
+an actual native-compaction membership reconciliation retains its established
+snapshot append behavior.
 
 ### 13. Measure the overlay delta, including absorbed stubs
 
@@ -239,24 +244,19 @@ makes an unchanged re-fold exactly zero, includes shorter or longer in-place
 summary replacements, and keeps whole-fold/unfold deltas symmetric. It also
 avoids maintaining a second hand-derived formula beside `buildOverlay`.
 
-These are chars/4 planning estimates aligned with pi's compaction estimator.
-The projected context percentage starts from the last provider-reported usage,
-which lags an in-turn mutation; neither value is an exact billed saving.
+These are chars/4 planning estimates aligned with Pi's estimator. The projected
+percentage applies the overlay delta to Pi's estimated context baseline and is
+labeled mutation-only because it excludes the response being generated. Neither
+value is an exact billed saving.
 
 ## Implementation mapping
 
-- **core.ts**: add `buildContextMap(msgs, spans)` (pure, returns ordered rows for
-  live msgs + folds). Change `planUnfold` to return net `restoredTokens`
-  (`Δlive`) alongside `restoredMsgs`. Keep `planFold.freedTokens` (already
-  net); expose it unchanged. `searchMessages`/`serializeSpan` already return
-  array-friendly data for batched callers.
-- **index.ts**: rename the five tools; add `context_map`; `context_peek` takes
-  `ids: string[]`, `context_search` takes `patterns: string[]`; number rendering
-  (`|Δ|`, projected ctx, non-saving guard, value-derived sign); move the shared
-  preamble into the consolidated `promptGuidelines`.
-- **core.test.ts**: update unfold assertions to the net `restoredTokens`
-  semantics; add a `buildContextMap` test; add batched `peek(ids)` /
-  `search(patterns)` shape tests.
+- **core.ts**: pure fold/unfold planning, optional summary-fragment metadata,
+  exact overlay-delta accounting, reconciliation, mapping, search and recovery.
+- **index.ts**: five batched tools, persistence wiring, and honest mutation-only
+  projected context presentation.
+- **core.test.ts / index.test.ts**: pure lifecycle regressions plus mocked public
+  tool, persistence, recovery, validation and output contracts.
 
 ## Verification
 
@@ -291,6 +291,6 @@ proceeds.
 ## Out of scope
 
 - Auto-compaction behavior (we adapt to it; we do not change it).
-- Persistence format (the `infinite-context` span entry stays as-is).
+- Bulk migration or rewriting historical transcript entries.
 - Restoring content that pi's native compaction already discarded: folds are
   reversible only while their members are part of the active context.

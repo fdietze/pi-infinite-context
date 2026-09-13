@@ -106,20 +106,22 @@ function overviewTail(spans: Span[], msgs: BranchMsg[]): string {
   return `folds: ${totalSpans} · ${tok(hiddenTokens)} hidden`;
 }
 
-// Projected context fill after a mutation. getContextUsage().tokens reflects the
-// LAST assistant usage (agent-session.js), so a just-made fold only shows on the
-// next call. Project it from last + the net token delta (fold: negative,
-// unfold: positive) so the reported numbers reconcile in place. Empty when the
-// last usage is unknown (e.g. right after compaction).
+// Mutation-only projected context fill. Pi exposes an estimated current-context
+// baseline, not an exact billed count. Applying the complete overlay delta makes
+// the mutation itself reconcilable, but cannot include the tool response being
+// generated now. Empty when Pi's baseline is unavailable.
 function projectedCtx(
   usage: { contextWindow: number; tokens: number | null } | undefined,
   deltaTokens: number,
 ): string {
   const win = usage?.contextWindow ?? 0;
-  const last = usage?.tokens ?? null;
-  if (win <= 0 || last == null) return "";
-  const proj = Math.max(0, last + deltaTokens);
-  return ` → ctx ~${Math.round((proj / win) * 100)}% (last ${Math.round((last / win) * 100)}%)`;
+  const baseline = usage?.tokens ?? null;
+  if (win <= 0 || baseline == null) return "";
+  const projected = Math.max(0, baseline + deltaTokens);
+  return (
+    ` → mutation-only ctx projection ~${Math.round((projected / win) * 100)}% ` +
+    `(Pi estimate ${Math.round((baseline / win) * 100)}%; excludes this response)`
+  );
 }
 
 // Signed percentage of the context window; sign derived from the value (never a
@@ -201,8 +203,10 @@ export default function (pi: ExtensionAPI) {
     branchMessages(
       ctx.sessionManager.buildContextEntries() as unknown as BranchEntry[],
     );
-  // Drop span members that native compaction removed from the active context;
-  // persists only when something actually changed (idempotent otherwise).
+  // Drop span members that native compaction removed from the active context.
+  // This preserves the established persistence rule: an actual membership
+  // change appends the reconciled snapshot. Fragment normalization happens only
+  // inside mutation plans, so missing/invalid metadata alone never writes.
   const reconcile = (msgs: BranchMsg[]) => {
     const r = reconcileSpans(spans, msgs);
     spans = r.spans;
@@ -297,8 +301,8 @@ export default function (pi: ExtensionAPI) {
     label: "Context map",
     description:
       "Index your active conversation context in order. Live rows show [#id] · role · estimated tokens · snippet; " +
-      "fold rows show [#id] · hidden size · summary. The header totals it up and adds context fill from the last " +
-      "reported usage. All token numbers are chars/4 estimates. No arguments.",
+      "fold rows show [#id] · hidden size · summary. The header totals it up and adds Pi's estimated context fill. " +
+      "All token numbers are chars/4 estimates. No arguments.",
     parameters: Type.Object({}),
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       const msgs = reconcile(activeMsgs(ctx));
@@ -384,7 +388,7 @@ export default function (pi: ExtensionAPI) {
       "Replace inclusive message ranges with reversible fold stubs. A supplied summary stays visible in the stub; " +
       "hidden messages remain available to context_search, context_peek, and context_unfold. If a range touches an " +
       "assistant turn that made tool calls, the whole turn and all its tool results fold together. Existing folds " +
-      "touched by a range are absorbed whole, joining distinct summary clauses once. Set replaceSummary on an item to replace " +
+      "touched by a range are absorbed whole, retaining opaque summary contributions once per shared lineage. Set replaceSummary on an item to replace " +
       "or clear one existing fold's visible summary in place without changing its hidden messages. Reported token " +
       "changes compare the before/after overlays using pi's chars/4 estimator; they are not exact billed usage.",
     promptSnippet:
@@ -404,8 +408,10 @@ export default function (pi: ExtensionAPI) {
         to: it.to === undefined ? undefined : bareId(it.to),
       }));
       const plan = planFold(msgs, spans, items);
-      spans = plan.spans;
-      if (plan.folded || plan.replaced.length) persist();
+      if (plan.folded || plan.replaced.length) {
+        spans = plan.spans;
+        persist();
+      }
       const usage = ctx.getContextUsage();
       const win = usage?.contextWindow ?? 0;
       const tail = overviewTail(spans, msgs);
@@ -495,8 +501,10 @@ export default function (pi: ExtensionAPI) {
         to: it.to === undefined ? undefined : bareId(it.to),
       }));
       const plan = planUnfold(msgs, spans, items);
-      spans = plan.spans;
-      if (plan.applied.length) persist();
+      if (plan.applied.length) {
+        spans = plan.spans;
+        persist();
+      }
       const usage = ctx.getContextUsage();
       const win = usage?.contextWindow ?? 0;
       const tail = overviewTail(spans, msgs);
