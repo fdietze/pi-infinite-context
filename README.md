@@ -1,13 +1,16 @@
 # pi-infinite-context
 
-*This readme is fully human-written.*
+A [Pi](https://pi.dev/) extension for long-lived sessions. It keeps an ordered, searchable archive inside the current session while the model sees only a finite working context.
 
-This [pi](https://pi.dev/) extension enables an infinite context experience for agentic chat sessions. It provides tools for the agent to fold and summarize arbitrary parts of its history. Summarized content is not lost. It can still be searched and unfolded on demand. This is a more fine-grained alternative to auto compaction (which summarizes the entire history) commonly found in many harnesses.
+The agent can:
 
-![A selected range of stored chat history is replaced by a summary in active context while the original messages remain available.](docs/folding.svg)
+- recursively fold contiguous visible context roots into a summarized parent;
+- navigate roots and direct fold children;
+- search every current-branch message and fold summary;
+- read archived text without permanently restoring it; and
+- replace the summary of a visible root fold.
 
-This turns out to work surprisingly well with claude-opus-4/5 and gpt-5.6-sol models. I usually have a single chat per project and use it to work through many more tasks than would be possible with limited context. I rarely notice any task performance / understanding degradation.
-
+Folding never changes the original session messages. Native Pi compaction is blocked so the fold tree remains the only compactor. If the provider still overflows, the error remains visible rather than silently replacing history with native compaction.
 
 ## Install
 
@@ -15,9 +18,16 @@ This turns out to work surprisingly well with claude-opus-4/5 and gpt-5.6-sol mo
 pi install git:github.com/fdietze/pi-infinite-context
 ```
 
-## Prior Art
+Start a new session after installing this v2 architecture. Old extension snapshots and sessions that already contain native compaction are deliberately unsupported.
 
-- [Opencode-DCP/opencode-dynamic-context-pruning](https://github.com/Opencode-DCP/opencode-dynamic-context-pruning)
+## Development
+
+```bash
+nix develop -c npm ci
+nix develop -c npm run ci
+```
+
+See [DESIGN.md](DESIGN.md) for invariants and tool semantics.
 
 ## License
 

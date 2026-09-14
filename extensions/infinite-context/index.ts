@@ -1,697 +1,379 @@
-/**
- * Infinite Context - the agent edits its own context (imperative shell).
- *
- * Idea: the agent references messages by id via five context_ tools. Ids are
- * NOT prefixed onto live messages; the agent learns them from context_map
- * (whole-context orientation list: id + role + tokens + snippet + fold state)
- * and from context_search/context_peek. context_fold (fold a range, with an
- * optional summary) and context_unfold (restore a fold or a sub-range, which
- * splits it) are the mutators; context_map, context_peek (read folds' contents)
- * and context_search (grep by regex) are the reads. Nothing in the overlay
- * carries an inline `[#id]` — not even fold stubs: ids exist only in tool
- * results, one uniform rule.
- *
- * Why no inline `[#id]` anywhere: per-message prefixes trained ~85% first-token
- * imitation (the model echoed markers into its own output) and cost marker
- * tokens on every message every call, for ids the map already exposes. Dropping
- * them removes the imitation-defense machinery and keeps live messages byte-
- * identical across calls (native prompt cache intact). Fold stubs followed for
- * the same reasons: the id was readable inline only in the rare "unfold what
- * I'm looking at" case, which now costs one context_map call — and
- * context_fold's own result already printed the fold id anyway.
- *
- * Why the id lookup needs the session entries: the provider serializes only
- * `role` + `content`; extra fields on the message object never reach the model,
- * and the entry `id` lives only on the session *entry*, not on the AgentMessage
- * (see docs/session-format.md). So the context handler correlates entry <->
- * message via `timestamp`+`role`.
- *
- * Why buildContextEntries() and not getBranch(): after pi's native compaction
- * the raw branch still contains messages the model no longer sees. The tools
- * must describe the ACTIVE context (map/search/fold over what is actually
- * sent), so they read buildContextEntries() — compaction applied, summaries
- * included. Spans referencing compacted-away members are reconciled lazily
- * (reconcileSpans) so folds never report phantom savings. Only the persisted
- * span list is still reconstructed from getBranch(): its custom entries can
- * predate the compaction cut.
- *
- * Persistence: the cumulative span list is written via pi.appendEntry as a
- * custom entry into the session and reconstructed in session_start/session_tree
- * (analogous to examples/extensions/todo.ts).
- *
- * This file is only the shell: wire pi events/tools. All logic is pure in
- * ./core.ts (tested via ./core.test.ts).
- *
- * Docs: docs/extensions.md ("context" event, registerTool, appendEntry),
- *       docs/session-format.md (entry/message types, getBranch, ids).
- */
-
+import { randomUUID } from "node:crypto";
 import type {
   ExtensionAPI,
   ExtensionContext,
-  Theme,
-  ThemeColor,
-  ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import {
+  type Forest,
+  type Item,
+  INFINITE_CONTEXT_ENTRY,
+  allItems,
+  findItem,
+  messageItem,
+  originalIds,
+  parseSnapshot,
+  replaceRootSummary,
+  snapshot,
+  syncOriginals,
+  wrapRootRanges,
+} from "./forest.ts";
 import {
   type AgentMessageLike,
   type BranchEntry,
-  type BranchMsg,
-  type Span,
-  INFINITE_CONTEXT_ENTRY,
-  branchMessages,
-  buildContextMap,
-  type MapRow,
+  type OriginalMessage,
+  branchOriginals,
   buildOverlay,
-  fmtTokens,
-  planFold,
-  planUnfold,
-  planNudge,
-  type SearchHit,
-  type SearchResult,
-  SEARCH_LINES_PER_MESSAGE,
-  SEARCH_LINES_PER_PATTERN,
-  compileSearchPattern,
-  reconcileSpans,
-  reconstructSpans,
-  searchMessages,
-  serializeMessages,
-  summarizeTree,
-} from "./core.ts";
+  estimateContextTokens,
+  planRootRanges,
+  serializeMessage,
+} from "./messages.ts";
+import { planNudge } from "./nudge.ts";
+import {
+  DEFAULT_PAGE_LIMIT,
+  MAX_PAGE_LIMIT,
+  MAX_OUTPUT_BYTES,
+  boundOutput,
+  lineWindow,
+  parsePage,
+} from "./output.ts";
+import {
+  SEARCH_MATCHES_PER_ITEM,
+  SEARCH_MATCHES_PER_PATTERN,
+  compilePattern,
+  searchArchive,
+} from "./search.ts";
 
-// Ids appear as `[#id]` in tool output, so the model tends to echo the `#`
-// back. Strip one leading `#` at the tool boundary (parse, don't validate) so
-// `#5` and `5` resolve identically; core only ever sees bare ids.
 const bareId = (id: string) => id.replace(/^#/, "");
+const fmtTokens = (tokens: number) =>
+  tokens < 1000 ? String(tokens) : `${(tokens / 1000).toFixed(1).replace(/\.0$/, "")}k`;
 
-// --- preview formatting helpers (TUI only) -------------------------------
-const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
-// All numeric sizes in this extension are TOKEN estimates (chars/4). The `tok`
-// suffix disambiguates them from the `msgs` count on the same preview line.
-const tok = (n: number) => `${fmtTokens(n)} tok`;
+const PageParams = {
+  offset: Type.Optional(
+    Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+  ),
+  limit: Type.Optional(
+    Type.Integer({ minimum: 1, maximum: MAX_PAGE_LIMIT }),
+  ),
+};
 
-// Context fill as "20% (202.5k/1000k)", or "" when unknown.
-function ctxFill(contextWindow: number, contextTokens: number | null): string {
-  return contextWindow > 0 && contextTokens != null
-    ? `${Math.round((contextTokens / contextWindow) * 100)}% (${fmtTokens(contextTokens)}/${fmtTokens(contextWindow)})`
-    : "";
+function directItems(roots: Forest, id?: string): { label: string; items: Forest } {
+  if (!id) return { label: "roots", items: roots };
+  const item = findItem(roots, id);
+  if (!item) throw new Error(`Unknown node id: ${id}`);
+  if (item.kind !== "fold") throw new Error(`Message ${id} has no children`);
+  return { label: `children of ${id}`, items: item.children };
 }
 
-// Shared, symmetric overview tail (model-facing): totals + budget, identical
-// after either mutator so the model always sees the same map + pressure.
-function overviewTail(spans: Span[], msgs: BranchMsg[]): string {
-  const { totalSpans, hiddenTokens } = summarizeTree(spans, msgs);
-  return `folds: ${totalSpans} · ${tok(hiddenTokens)} hidden`;
-}
-
-// Projected context fill after a mutation. getContextUsage().tokens reflects the
-// LAST assistant usage (agent-session.js), so a just-made fold only shows on the
-// next call. Project it from last + the net token delta (fold: negative,
-// unfold: positive) so the reported numbers reconcile in place. Empty when the
-// last usage is unknown (e.g. right after compaction).
-function projectedCtx(
-  usage: { contextWindow: number; tokens: number | null } | undefined,
-  deltaTokens: number,
-): string {
-  const win = usage?.contextWindow ?? 0;
-  const last = usage?.tokens ?? null;
-  if (win <= 0 || last == null) return "";
-  const proj = Math.max(0, last + deltaTokens);
-  return ` → ctx ~${Math.round((proj / win) * 100)}% (last ${Math.round((last / win) * 100)}%)`;
-}
-
-// Signed percentage of the context window; sign derived from the value (never a
-// hardcoded prefix), so a non-saving fold can't print a double minus.
-function pctOf(deltaTokens: number, contextWindow: number): string {
-  if (contextWindow <= 0) return "";
-  const p = (deltaTokens / contextWindow) * 100;
-  return ` (${p >= 0 ? "+" : "−"}${Math.abs(p).toFixed(1)}%)`;
-}
-
-// Shared TUI detail for the two inverse mutators (fold/unfold).
-interface MutateDetails {
-  action: "fold" | "unfold";
-  ok: boolean; // applied something
-  msgs: number; // messages folded / restored
-  deltaTokens: number; // freed (fold) / restored (unfold)
-  tail: string; // standing state line (folds · hidden · ctx)
-  summaries: string[]; // fold digests (empty for unfold)
-  failed: string[]; // unresolved ids
-  failLabel: string; // "unknown" | "not folded"
-}
-
-// One renderer for both mutators: the host TUI shows a terse action line in its
-// compact view, then standing state + digests/failures when the host API
-// requests details (`opts.expanded`). Symmetric glyphs ⊟ (fold) / ⊞ (unfold).
-function renderMutate(
-  d: MutateDetails,
-  opts: ToolRenderResultOptions,
-  theme: Theme,
-): Text {
-  const fold = d.action === "fold";
-  const glyph = fold ? "⊟" : "⊞";
-  const past = fold ? "folded" : "unfolded";
-  const verb = fold ? "freed" : "restored";
-  const color: ThemeColor = d.ok ? "success" : "warning";
-  const head = d.ok
-    ? `${glyph} ${past} ${plural(d.msgs, "msg")} · ${verb} ${tok(d.deltaTokens)}`
-    : `${glyph} nothing ${past} · ${d.failed.length} ${d.failLabel}`;
-  if (!opts.expanded) return new Text(theme.fg(color, head), 0, 0);
-  const lines = [theme.fg(color, head)];
-  if (d.ok) {
-    lines.push(theme.fg("dim", d.tail));
-    for (const s of d.summaries) lines.push(theme.fg("dim", `→ ${s}`));
+function itemPreview(item: Item, byId: ReadonlyMap<string, OriginalMessage>): string {
+  if (item.kind === "fold") {
+    const summary = item.summary.replace(/\s+/g, " ").trim();
+    const preview = summary.length > 100 ? `${summary.slice(0, 100)}…` : summary || "(empty summary)";
+    return `[#${item.id}] fold · ${item.children.length} direct children · ${originalIds([item]).length} messages · ${preview}`;
   }
-  if (d.failed.length)
-    lines.push(theme.fg("warning", `${d.failLabel}: ${d.failed.join(", ")}`));
-  return new Text(lines.join("\n"), 0, 0);
+  const original = byId.get(item.id)!;
+  const text = serializeMessage(original.message).replace(/\s+/g, " ").trim();
+  const preview = text.length > 100 ? `${text.slice(0, 100)}…` : text || "(empty text projection)";
+  return `[#${item.id}] ${original.message.role} · ~${fmtTokens(estimateContextTokens(original.message))} tokens · ${preview}`;
 }
 
-export default function (pi: ExtensionAPI) {
-  // In-memory source of truth, reconstructed from the session.
-  let spans: Span[] = [];
+function visibleTokens(roots: Forest, byId: ReadonlyMap<string, OriginalMessage>): number {
+  return roots.reduce((total, item) => {
+    if (item.kind === "message") return total + estimateContextTokens(byId.get(item.id)!.message);
+    const ids = originalIds([item]);
+    const hasProjectionAnchor = ids.some((id) => {
+      const message = byId.get(id)!.message;
+      return message.role !== "bashExecution" || !message.excludeFromContext;
+    });
+    if (!hasProjectionAnchor) return total;
+    const text = item.summary || `(folded archive: ${ids.length} messages)`;
+    return total + Math.ceil(text.length / 4);
+  }, 0);
+}
 
-  const persist = () => pi.appendEntry(INFINITE_CONTEXT_ENTRY, { spans });
-  // Active context entries (native compaction applied) as addressable messages.
-  const activeMsgs = (ctx: ExtensionContext) =>
-    branchMessages(
-      ctx.sessionManager.buildContextEntries() as unknown as BranchEntry[],
-    );
-  // Drop span members that native compaction removed from the active context;
-  // persists only when something actually changed (idempotent otherwise).
-  const reconcile = (msgs: BranchMsg[]) => {
-    const r = reconcileSpans(spans, msgs);
-    spans = r.spans;
-    if (r.changed) persist();
-    return msgs;
-  };
-  const reconstruct = (ctx: ExtensionContext) => {
-    // Raw branch, not buildContextEntries(): the last infinite-context custom
-    // entry can lie before a later compaction cut.
-    spans = reconstructSpans(
-      ctx.sessionManager.getBranch() as unknown as BranchEntry[],
-    );
-    reconcile(activeMsgs(ctx));
-  };
-
-  pi.on("session_start", async (_event, ctx) => reconstruct(ctx));
-  pi.on("session_tree", async (_event, ctx) => reconstruct(ctx));
-
-  // Nudge the agent to fold before it runs out of context. On each turn we read
-  // the context fill and, when it first crosses a 5-point band at/above 75%,
-  // steer a one-off note toward the context_ tools (see planNudge). In-memory
-  // only: the worst case after a reload is one extra nudge. getContextUsage()
-  // has no `percent`, so derive it from tokens/contextWindow (guard null/0),
-  // like the previews above.
+export default function infiniteContext(pi: ExtensionAPI) {
+  let roots: Forest = [];
+  let stateError: Error | undefined;
+  let loaded = false;
   let lastNudgedBand = 0;
+
+  const branch = (ctx: ExtensionContext) =>
+    ctx.sessionManager.getBranch() as unknown as BranchEntry[];
+
+  const load = (ctx: ExtensionContext) => {
+    stateError = undefined;
+    loaded = true;
+    try {
+      const entries = branch(ctx);
+      if (entries.some((entry) => entry.type === "compaction"))
+        throw new Error(
+          "This session already contains native compaction and is incompatible with infinite-context v2; start a new session.",
+        );
+      const originals = branchOriginals(entries);
+      const saved = entries.filter(
+        (entry) => entry.type === "custom" && entry.customType === INFINITE_CONTEXT_ENTRY,
+      );
+      roots = saved.length
+        ? parseSnapshot(saved.at(-1)!.data).roots
+        : originals.map(({ id }) => messageItem(id));
+      roots = syncOriginals(roots, originals.map(({ id }) => id));
+    } catch (error) {
+      stateError = error as Error;
+      roots = [];
+      ctx.ui.notify(`infinite-context: ${stateError.message}`, "error");
+    }
+  };
+
+  const current = (ctx: ExtensionContext) => {
+    // Some headless SDK hosts do not emit session_start on programmatic reload.
+    // Lazy loading keeps snapshot restoration correct without host-specific hooks.
+    if (!loaded) load(ctx);
+    if (stateError) throw stateError;
+    const entries = branch(ctx);
+    if (entries.some((entry) => entry.type === "compaction"))
+      throw new Error(
+        "Native compaction is incompatible with infinite-context v2; start a new session.",
+      );
+    const originals = branchOriginals(entries);
+    const derivedRoots = syncOriginals(roots, originals.map(({ id }) => id));
+    return {
+      roots: derivedRoots,
+      originals,
+      byId: new Map(originals.map((original) => [original.id, original] as const)),
+    };
+  };
+
+  const persist = (next: Forest) => {
+    roots = next;
+    pi.appendEntry(INFINITE_CONTEXT_ENTRY, snapshot(roots));
+  };
+
+  pi.on("session_start", async (_event, ctx) => load(ctx));
+  pi.on("session_tree", async (_event, ctx) => load(ctx));
+
+  pi.on("context", async (event, ctx) => {
+    if (stateError) return;
+    const state = current(ctx);
+    return {
+      messages: buildOverlay(
+        event.messages as AgentMessageLike[],
+        state.originals,
+        state.roots,
+      ) as unknown as typeof event.messages,
+    };
+  });
+
+  pi.on("session_before_compact", async (event, ctx) => {
+    ctx.ui.notify(
+      `infinite-context blocked ${event.reason} compaction: the fold tree is the sole compactor. Fold more context or start a new session if the provider reports overflow.`,
+      "warning",
+    );
+    return { cancel: true };
+  });
+
   pi.on("turn_end", async (event, ctx) => {
     const usage = ctx.getContextUsage();
-    const win = usage?.contextWindow ?? 0;
+    const window = usage?.contextWindow ?? 0;
     const tokens = usage?.tokens ?? null;
-    if (win <= 0 || tokens == null) return; // fill unknown (e.g. post-compaction)
-    const percent = (tokens / win) * 100;
-    // Only steer on a continuing turn: the note then lands before the model's
-    // next LLM call, not while it sits idle at the user prompt.
+    if (window <= 0 || tokens == null) return;
+    const percent = (tokens / window) * 100;
     const message = event.message as { stopReason?: string };
-    const continuing =
-      message.stopReason === "toolUse" && event.toolResults.length > 0;
-    const { nudge, band } = planNudge(percent, lastNudgedBand, continuing);
-    lastNudgedBand = band;
-    if (!nudge) return;
+    const continuing = message.stopReason === "toolUse" && event.toolResults.length > 0;
+    const planned = planNudge(percent, lastNudgedBand, continuing);
+    lastNudgedBand = planned.band;
+    if (!planned.nudge) return;
     pi.sendMessage(
       {
         customType: "infinite-context/nudge",
         content:
           `<context-maintenance>\nContext is ~${Math.round(percent)}% full. ` +
-          `Before continuing, run context_map, then batch a context_fold ` +
-          `of completed or superseded material. Preserve the active request, ` +
-          `open loops, unresolved errors, and evidence you still need. ` +
-          `A no-op is valid if nothing is safe to fold.\n</context-maintenance>`,
+          "Use context_map, then context_fold completed or superseded roots. " +
+          "Keep the active request, open loops, unresolved errors, and evidence needed soon. " +
+          "Native compaction is blocked, so an actual overflow will remain visible.\n</context-maintenance>",
         display: true,
-        details: { band },
+        details: { band: planned.band },
       },
       { deliverAs: "steer" },
     );
   });
 
-  // Warn the user when pi's native auto-compaction discards history. Folds keep
-  // their content searchable; compaction does not, so this is the one event that
-  // makes material unreachable for good.
-  //
-  // Why this hook rather than reading the compaction setting: extensions have no
-  // settings-read API, and a setting is only a map of what will happen. The hook
-  // fires on the territory — the compaction actually taking place — so a session
-  // that never compacts never warns, whatever the config says.
-  //
-  // A manual /compact is the user's own decision, so only automatic triggers
-  // warn. Compaction proceeds either way (returning nothing does not cancel):
-  // this reports, it does not intervene. `notify` is a no-op without a UI, so it
-  // needs no `hasUI` guard.
-  pi.on("session_before_compact", async (event, ctx) => {
-    if (event.reason === "manual") return;
-    ctx.ui.notify(
-      "infinite-context: pi's auto-compaction is discarding history that folds " +
-        "keep searchable. Set compaction.enabled: false to rely on folds only.",
-      "warning",
-    );
-  });
-
-  // Replace folded ranges with a stub; live messages pass through untouched.
-  pi.on("context", async (event, ctx) => {
-    const messages = buildOverlay(
-      event.messages as AgentMessageLike[],
-      activeMsgs(ctx),
-      spans,
-    );
-    return { messages: messages as unknown as typeof event.messages };
-  });
-
-  // --- map (read-only orientation) -----------------------------------------
-
   pi.registerTool({
     name: "context_map",
     label: "Context map",
     description:
-      "Index your active conversation context in order. Live rows show [#id] · role · estimated tokens · snippet; " +
-      "fold rows show [#id] · hidden size · summary. The header totals it up and adds context fill from the last " +
-      "reported usage. All token numbers are chars/4 estimates. No arguments.",
-    parameters: Type.Object({}),
-    async execute(_id, _params, _signal, _onUpdate, ctx) {
-      const msgs = reconcile(activeMsgs(ctx));
-      const rows = buildContextMap(msgs, spans);
-      const usage = ctx.getContextUsage();
-      const { totalSpans, hiddenTokens } = summarizeTree(spans, msgs);
-      const fill = ctxFill(usage?.contextWindow ?? 0, usage?.tokens ?? null);
-      const header = `${rows.length} rows · folds: ${totalSpans} · ${tok(hiddenTokens)} hidden${fill ? ` · ctx ${fill}` : ""}`;
-      const lines = rows.map((r) =>
-        r.kind === "fold"
-          ? `[#${r.id}] ⊟ ${plural(r.msgs, "msg")} · ${tok(r.tokens)} hidden · ${r.text}`
-          : `[#${r.id}] ${r.role} · ${tok(r.tokens)} · ${r.text}`,
-      );
-      const text = rows.length
-        ? `${header}\n${lines.join("\n")}`
-        : "Context is empty.";
+      "List ordered visible roots, or the direct children of one fold. Output is paginated and previews are bounded; it never recursively dumps a subtree.",
+    parameters: Type.Object({
+      id: Type.Optional(Type.String({ description: "Fold id whose direct children to list. Omit for visible roots." })),
+      ...PageParams,
+    }),
+    executionMode: "sequential",
+    async execute(_callId, params, _signal, _update, ctx) {
+      const state = current(ctx);
+      const page = parsePage(params.offset, params.limit);
+      const id = params.id === undefined ? undefined : bareId(params.id);
+      const listing = directItems(state.roots, id);
+      const start = page.offset - 1;
+      const selected = listing.items.slice(start, start + page.limit);
+      const rows = selected.map((item) => itemPreview(item, state.byId));
+      const end = selected.length ? start + selected.length : start;
+      const footer = `${listing.label}: items ${selected.length ? `${page.offset}-${end}` : "none"} of ${listing.items.length}`;
       return {
-        content: [{ type: "text", text }],
-        details: { rows, header } as { rows: MapRow[]; header: string },
+        content: [{ type: "text", text: boundOutput([...rows, footer].join("\n")) }],
+        details: { count: selected.length, total: listing.items.length, id },
       };
     },
-    renderResult(result, opts, theme) {
-      const d = result.details as
-        | { rows: MapRow[]; header: string }
-        | undefined;
-      if (!d) return new Text("", 0, 0);
-      const head = `▤ ${d.header}`;
-      if (!opts.expanded) return new Text(theme.fg("accent", head), 0, 0);
-      const lines = [
-        theme.fg("accent", head),
-        ...d.rows.map((r) =>
-          theme.fg(
-            "dim",
-            r.kind === "fold"
-              ? `[#${r.id}] ⊟ ${plural(r.msgs, "msg")} · ${tok(r.tokens)} · ${r.text}`
-              : `[#${r.id}] ${r.role} · ${tok(r.tokens)} · ${r.text}`,
-          ),
-        ),
-      ];
-      return new Text(lines.join("\n"), 0, 0);
-    },
-  });
-
-  // --- fold ----------------------------------------------------------------
-
-  const FoldParam = Type.Object({
-    items: Type.Array(
-      Type.Object({
-        from: Type.String({
-          description:
-            "Start id, as shown by context_map, context_search, or context_peek.",
-        }),
-        to: Type.Optional(
-          Type.String({
-            description:
-              "Inclusive end id. Defaults to `from`; either order is accepted.",
-          }),
-        ),
-        summary: Type.Optional(
-          Type.String({
-            description:
-              "Short digest kept visible in the stub. Omit to leave only a bare stub (for pure noise).",
-          }),
-        ),
-      }),
-      {
-        description:
-          "Inclusive ranges to fold. Batch independent ranges in one call.",
-      },
-    ),
-  });
-
-  pi.registerTool({
-    name: "context_fold",
-    label: "Context fold",
-    description:
-      "Replace inclusive message ranges with reversible fold stubs. A supplied summary stays visible in the stub; " +
-      "hidden messages remain available to context_search, context_peek, and context_unfold. If a range touches an " +
-      "assistant turn that made tool calls, the whole turn and all its tool results fold together. Existing folds " +
-      "touched by a range are absorbed whole, joining their summaries.",
-    promptSnippet:
-      "Reversibly fold completed conversation history; use context_map for ids and context_search/context_peek/context_unfold to recover it",
-    promptGuidelines: [
-      "Use context_fold on your own, without being asked, whenever completed material bloats your active context — typically after finishing an exploration, debugging, implementation, or verification phase, and after several large tool results. Good candidates: digested file reads and logs, redundant re-reads, superseded plans and old file versions, completed steps, and dead ends. Fold before the context limit forces coarser auto-compaction.",
-      "Do not fold governing instructions (loaded skills, AGENTS.md), the active request, unresolved errors, open decisions, or anything needed verbatim soon. Fold only when the stub or summary is materially smaller than what it hides.",
-      "In a context_fold summary, keep only what is likely to matter later: open loops, current state (paths, symbols, passing tests), decisions with rejected options, and gotchas. For a dead end, one line: 'tried X, failed because Y'. Drop narration and raw output. Omit the summary entirely when nothing is worth keeping.",
-      "Use context_map to pick ranges and batch independent ranges into one context_fold call. To recover folded detail: context_search to locate, context_peek to read in place, context_unfold only when messages must return to the active context.",
-    ],
-    parameters: FoldParam,
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const msgs = reconcile(activeMsgs(ctx));
-      const items = params.items.map((it) => ({
-        ...it,
-        from: bareId(it.from),
-        to: it.to === undefined ? undefined : bareId(it.to),
-      }));
-      const plan = planFold(msgs, spans, items);
-      spans = plan.spans;
-      if (plan.folded) persist();
-      const usage = ctx.getContextUsage();
-      const win = usage?.contextWindow ?? 0;
-      const tail = overviewTail(spans, msgs);
-      // Fold lowers live tokens -> delta is negative; freedTokens is the
-      // positive magnitude. freedTokens <= 0 means the stub/summary is as big as
-      // the hidden content: the fold still applied, but there is no net saving.
-      const saved = plan.freedTokens > 0;
-      const head = plan.applied.length
-        ? `+ folded ${plural(plan.folded, "msg")} into ${plural(plan.applied.length, "fold")}: ${plan.applied.join(", ")}, ` +
-          (saved
-            ? `freed ${fmtTokens(plan.freedTokens)}${pctOf(-plan.freedTokens, win)}`
-            : "no net saving (stub/summary ≥ hidden content)") +
-          projectedCtx(usage, -plan.freedTokens) +
-          (plan.unknown.length
-            ? `. unknown id(s): ${plan.unknown.join(", ")}`
-            : "")
-        : `Folded nothing. unknown id(s): ${plan.unknown.join(", ")}`;
-      return {
-        content: [{ type: "text", text: `${head}\n${tail}` }],
-        details: {
-          action: "fold",
-          ok: plan.applied.length > 0,
-          msgs: plan.folded,
-          deltaTokens: plan.freedTokens,
-          tail,
-          summaries: plan.summaries.filter((s) => s),
-          failed: plan.unknown,
-          failLabel: "unknown",
-        } as MutateDetails,
-      };
-    },
-    renderResult(result, opts, theme) {
-      const d = result.details as MutateDetails | undefined;
-      return d ? renderMutate(d, opts, theme) : new Text("", 0, 0);
-    },
-  });
-
-  // --- unfold --------------------------------------------------------------
-
-  const UnfoldParam = Type.Object({
-    items: Type.Array(
-      Type.Object({
-        from: Type.String({
-          description:
-            "Id of a fold stub or of a hidden message. Without `to`, restores its whole fold.",
-        }),
-        to: Type.Optional(
-          Type.String({
-            description:
-              "Inclusive end id of a sub-range. Must belong to the SAME fold as `from`, else the item is rejected. Set it equal to `from` to restore a single hidden message.",
-          }),
-        ),
-      }),
-      {
-        description:
-          "Folds or inclusive hidden sub-ranges to restore. Batch several in one call.",
-      },
-    ),
-  });
-
-  pi.registerTool({
-    name: "context_unfold",
-    label: "Context unfold",
-    description:
-      "Restore folded messages — inverse of context_fold. Restores a whole fold, or the from..to sub-range, " +
-      "which splits the fold and leaves up to two remainder folds, each carrying the original summary. Assistant " +
-      "turns with tool calls move together with all their tool results. To only read folded content, use " +
-      "context_peek instead.",
-    parameters: UnfoldParam,
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const msgs = reconcile(activeMsgs(ctx));
-      const items = params.items.map((it) => ({
-        ...it,
-        from: bareId(it.from),
-        to: it.to === undefined ? undefined : bareId(it.to),
-      }));
-      const plan = planUnfold(msgs, spans, items);
-      spans = plan.spans;
-      if (plan.applied.length) persist();
-      const usage = ctx.getContextUsage();
-      const win = usage?.contextWindow ?? 0;
-      const tail = overviewTail(spans, msgs);
-      // Unfold raises live tokens -> delta is positive (net: members + remnant
-      // stubs − removed stub).
-      // Cross-fold ranges are rejected rather than clamped, so they are reported
-      // separately from ids that simply are not folded.
-      const failed = [...plan.noop, ...plan.invalid];
-      const head =
-        (plan.applied.length
-          ? `− unfolded ${plural(plan.restoredMsgs, "msg")}: ${plan.applied.join(", ")}, restored ${fmtTokens(plan.restoredTokens)}${pctOf(plan.restoredTokens, win)}${projectedCtx(usage, plan.restoredTokens)}`
-          : "Unfolded nothing") +
-        (plan.noop.length ? `. not folded: ${plan.noop.join(", ")}` : "") +
-        (plan.invalid.length
-          ? `. \`to\` outside \`from\`'s fold: ${plan.invalid.join(", ")}`
-          : "");
-      return {
-        content: [{ type: "text", text: `${head}\n${tail}` }],
-        details: {
-          action: "unfold",
-          ok: plan.applied.length > 0,
-          msgs: plan.restoredMsgs,
-          deltaTokens: plan.restoredTokens,
-          tail,
-          summaries: [],
-          failed,
-          failLabel: "not restorable",
-        } as MutateDetails,
-      };
-    },
-    renderResult(result, opts, theme) {
-      const d = result.details as MutateDetails | undefined;
-      return d ? renderMutate(d, opts, theme) : new Text("", 0, 0);
-    },
-  });
-
-  // --- peek (read-only) ----------------------------------------------------
-
-  const PeekParam = Type.Object({
-    ids: Type.Array(
-      Type.String({
-        description:
-          "Id of a fold stub or of a hidden message; both resolve to the containing fold.",
-      }),
-      {
-        description:
-          "Fold ids to read, batched. Ids resolving to the same fold are printed once (with `offset`, each named message prints separately).",
-      },
-    ),
-    offset: Type.Optional(
-      Type.Integer({
-        minimum: 1,
-        description:
-          "First line to print. Given, only the messages named in `ids` are printed, not their whole fold. Line numbers are the ones context_search reports.",
-      }),
-    ),
   });
 
   pi.registerTool({
     name: "context_peek",
     label: "Context peek",
     description:
-      "Read folded messages without unfolding them. Prints each hidden message's id, role, estimated tokens and " +
-      "text, capped at about 2000 characters PER message. Use `offset` to read further down a long message, at " +
-      "the line numbers context_search reports.",
-    parameters: PeekParam,
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const msgs = reconcile(activeMsgs(ctx));
-      // An offset addresses a MESSAGE, so it selects one: a fold-level read has
-      // no meaningful offset, and printing every sibling of a fat fold defeats
-      // the windowed read the caller asked for. Without an offset the unit is
-      // the whole fold, as before.
-      const windowed = params.offset !== undefined;
-      const seen = new Set<string>(); // per message when windowed, else per fold
-      const folds = new Set<string>();
-      const blocks: string[] = [];
-      const missing: string[] = [];
-      let members = 0;
-      for (const rawId of params.ids) {
-        const id = bareId(rawId);
-        const span = spans.find(
-          (s) => s.fromId === id || s.memberIds.includes(id),
-        );
-        if (!span) {
-          missing.push(id);
-          continue;
-        }
-        const key = windowed ? id : span.fromId;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        folds.add(span.fromId);
-        const printIds = windowed ? [id] : span.memberIds;
-        members += printIds.length;
-        // The fold's size stays visible either way, so the model can read the
-        // rest without an offset when it wants to.
-        const head =
-          `fold [#${span.fromId}] · ${plural(span.memberIds.length, "member")}` +
-          (windowed ? `, showing [#${id}]:` : ":");
-        blocks.push(
-          `${head}\n\n${serializeMessages(printIds, msgs, params.offset)}`,
-        );
-      }
-      const text =
-        [
-          blocks.join("\n\n———\n\n"),
-          missing.length ? `no fold for: ${missing.join(", ")}` : "",
-        ]
-          .filter(Boolean)
-          .join("\n\n") || "No folds for those ids.";
+      `Read one original message's serialized text or exactly one fold's summary without changing context. ` +
+      `Uses 1-based line windows (default ${DEFAULT_PAGE_LIMIT}); every result reports total item lines. Output is capped at ${MAX_OUTPUT_BYTES} UTF-8 bytes, so a giant line may be clipped.`,
+    parameters: Type.Object({
+      id: Type.String({ description: "Stable message or fold id from context_map or context_search." }),
+      ...PageParams,
+    }),
+    executionMode: "sequential",
+    async execute(_callId, params, _signal, _update, ctx) {
+      const state = current(ctx);
+      const id = bareId(params.id);
+      const item = findItem(state.roots, id);
+      if (!item) throw new Error(`Unknown node id: ${id}`);
+      const page = parsePage(params.offset, params.limit);
+      const text = item.kind === "fold" ? item.summary : serializeMessage(state.byId.get(item.id)!.message);
+      const window = lineWindow(text, page.offset, page.limit, MAX_OUTPUT_BYTES - 500);
+      const kind = item.kind === "fold" ? "fold summary" : state.byId.get(item.id)!.message.role;
+      const range = window.end >= window.start ? `${window.start}-${window.end}` : "none";
+      const footer = `[#${id}] ${kind} · lines ${range} of ${window.totalLines}${window.clippedLine ? " · current line clipped by byte cap" : ""}`;
       return {
-        content: [{ type: "text", text }],
-        details: { folds: folds.size, members, missing } as {
-          folds: number;
-          members: number;
-          missing: string[];
-        },
+        content: [{ type: "text", text: boundOutput(`${window.text}${window.text ? "\n" : ""}${footer}`) }],
+        details: { id, kind, totalLines: window.totalLines, start: window.start, end: window.end },
       };
     },
-    renderResult(result, opts, theme) {
-      const d = result.details as
-        | { folds: number; members: number; missing: string[] }
-        | undefined;
-      if (!d) return new Text("", 0, 0);
-      if (!d.folds)
-        return new Text(theme.fg("warning", "◈ no folds for those ids"), 0, 0);
-      const head = `◈ ${plural(d.folds, "fold")} · ${plural(d.members, "member")}`;
-      if (!opts.expanded) return new Text(theme.fg("accent", head), 0, 0);
-      const lines = [theme.fg("accent", head)];
-      if (d.missing.length)
-        lines.push(theme.fg("warning", `missing: ${d.missing.join(", ")}`));
-      return new Text(lines.join("\n"), 0, 0);
-    },
   });
-
-  // --- search (read-only, find-by-content) ---------------------------------
-
-  const SearchParam = Type.Object({
-    patterns: Type.Array(
-      Type.String({
-        description:
-          "JavaScript (ECMAScript) regular expression, case-insensitive, matched per line. Escape literal metacharacters.",
-      }),
-      {
-        description:
-          "Patterns to search, batched; each returns its own hit group.",
-      },
-    ),
-  });
-
-  // Heading style, like ripgrep: a header per pattern, then per message a
-  // heading and its `lineNo: line` rows. Nothing describes this format to the
-  // model — it is legible on sight, so the tool description spends its tokens
-  // only on what the output cannot show (dialect, caps, where ids lead).
-  const searchGroup = (pattern: string, r: SearchResult): string => {
-    if (!r.totalLines) return `No hits for /${pattern}/.`;
-    const head =
-      `${plural(r.totalLines, "line")} in ${plural(r.totalMessages, "message")} for /${pattern}/` +
-      (r.foldedMessages ? ` (${r.foldedMessages} folded)` : "") +
-      ":";
-    const blocks = r.hits.map((h) =>
-      [
-        `[#${h.id}] ${h.role}${h.foldFrom ? ` (folded in [#${h.foldFrom}])` : ""}`,
-        ...h.lines.map((l) => `${l.line}: ${l.text}`),
-        ...(h.moreLines ? [`… +${h.moreLines} more`] : []),
-      ].join("\n"),
-    );
-    if (r.capped) blocks.push(`… capped at ${SEARCH_LINES_PER_PATTERN} lines`);
-    return [head, ...blocks].join("\n");
-  };
-
-  interface SearchDetails {
-    patterns: string[];
-    totalLines: number;
-    totalMessages: number;
-    folded: number;
-    hits: SearchHit[];
-  }
 
   pi.registerTool({
     name: "context_search",
     label: "Context search",
     description:
-      "grep over every message, folded or not, plus fold summaries. " +
-      "Patterns are JavaScript regular expressions, case-insensitive, matched per line. " +
-      `Output is capped (${SEARCH_LINES_PER_MESSAGE} lines per message, ${SEARCH_LINES_PER_PATTERN} per pattern); ` +
-      "use [#id] with context_peek or context_unfold.",
-    parameters: SearchParam,
-    async execute(_id, params, _signal, _onUpdate, ctx) {
-      const msgs = reconcile(activeMsgs(ctx));
-      const groups = params.patterns.map((pattern) => {
-        // Only compilation can fail on model input, so only compilation is
-        // caught: a later throw is a bug and must not be reported as a bad
-        // pattern, which would send the agent rewriting a correct one.
-        // Throwing is how a tool signals failure to pi (docs/extensions.md);
-        // one bad pattern fails the whole batch loudly.
-        let re: RegExp;
+      `Case-insensitive JavaScript regex search over every current-branch original and every reachable fold summary, once each. ` +
+      `Returns stable ids and 1-based lines. Each pattern emits at most ${SEARCH_MATCHES_PER_ITEM} lines per item and ${SEARCH_MATCHES_PER_PATTERN} lines overall.`,
+    parameters: Type.Object({
+      patterns: Type.Array(Type.String({ description: "JavaScript regular expression; empty patterns are rejected." }), {
+        minItems: 1,
+        maxItems: 20,
+      }),
+    }),
+    executionMode: "sequential",
+    async execute(_callId, params, _signal, _update, ctx) {
+      const state = current(ctx);
+      const groups = params.patterns.map((source) => {
+        let pattern: RegExp;
         try {
-          re = compileSearchPattern(pattern);
-        } catch (e) {
-          throw new Error(
-            `Invalid pattern /${pattern}/: ${(e as Error).message}`,
-          );
+          pattern = compilePattern(source);
+        } catch (error) {
+          throw new Error(`Invalid pattern /${source}/: ${(error as Error).message}`);
         }
-        return { pattern, result: searchMessages(msgs, spans, re) };
+        return { source, result: searchArchive(state.originals, state.roots, pattern) };
       });
-      const text = groups
-        .map((g) => searchGroup(g.pattern, g.result))
-        .join("\n\n");
+      const rendered = groups.map(({ source, result }) => {
+        if (!result.totalMatchingLines) return `No hits for /${source}/.`;
+        const lines = [
+          `${result.totalMatchingLines} matching lines in ${result.totalMatchingItems} items for /${source}/:`,
+        ];
+        for (const hit of result.hits) {
+          lines.push(
+            `[#${hit.id}] ${hit.role}${hit.parentFoldId ? ` · child of [#${hit.parentFoldId}]` : " · root"}`,
+            ...hit.matches.map((match) => `${match.line}: ${match.text}`),
+          );
+          if (hit.omittedMatches) lines.push(`… ${hit.omittedMatches} more matching lines in this item`);
+        }
+        if (result.capped) lines.push(`… capped at ${SEARCH_MATCHES_PER_PATTERN} emitted lines; refine the pattern`);
+        return lines.join("\n");
+      });
       return {
-        content: [{ type: "text", text }],
-        details: {
-          patterns: params.patterns,
-          totalLines: groups.reduce((t, g) => t + g.result.totalLines, 0),
-          totalMessages: groups.reduce((t, g) => t + g.result.totalMessages, 0),
-          folded: groups.reduce((t, g) => t + g.result.foldedMessages, 0),
-          hits: groups.flatMap((g) => g.result.hits),
-        } as SearchDetails,
+        content: [{ type: "text", text: boundOutput(rendered.join("\n\n")) }],
+        details: { patterns: params.patterns, matches: groups.reduce((n, group) => n + group.result.totalMatchingLines, 0) },
       };
     },
-    renderResult(result, opts, theme) {
-      const d = result.details as SearchDetails | undefined;
-      if (!d) return new Text("", 0, 0);
-      const pats = d.patterns.map((p) => `/${p}/`).join(", ");
-      if (!d.totalLines)
-        return new Text(theme.fg("muted", `⌕ no hits for ${pats}`), 0, 0);
-      const head =
-        `⌕ ${plural(d.totalLines, "line")} in ${plural(d.totalMessages, "msg")} for ${pats}` +
-        (d.folded ? ` · ${d.folded} folded` : "");
-      if (!opts.expanded) return new Text(theme.fg("accent", head), 0, 0);
-      const rows = d.hits.flatMap((h) => [
-        theme.fg(
-          "dim",
-          `[#${h.id}] ${h.role}${h.foldFrom ? ` (in ${h.foldFrom})` : ""}`,
-        ),
-        ...h.lines.map((l) => theme.fg("dim", `${l.line}: ${l.text}`)),
-      ]);
-      return new Text([theme.fg("accent", head), ...rows].join("\n"), 0, 0);
+  });
+
+  pi.registerTool({
+    name: "context_fold",
+    label: "Context fold",
+    description:
+      "Wrap contiguous currently visible root ranges in new folds. Each explicit summary is the new fold's projection; existing folds become children unchanged. The batch is all-or-nothing and tool calls/results remain indivisible.",
+    promptSnippet: "Fold completed context into a searchable recursive archive before the context limit",
+    promptGuidelines: [
+      "Use context_fold proactively after completed exploration, debugging, implementation, or verification phases and after large tool results; native compaction is blocked.",
+      "Keep governing instructions, the active request, unresolved errors, open decisions, and evidence needed soon as visible roots. Fold only when the replacement is worthwhile.",
+      "Write a short context_fold summary containing durable state, decisions, open loops, paths/symbols, and gotchas; use an empty summary only for disposable noise.",
+      "Use context_map for root ids, context_search to locate archived text, context_peek to read it, and context_summary to replace only a visible root fold summary. Reads never unfold context.",
+    ],
+    parameters: Type.Object({
+      items: Type.Array(
+        Type.Object({
+          from: Type.String({ description: "First visible root id." }),
+          to: Type.Optional(Type.String({ description: "Inclusive visible root id; defaults to from." })),
+          summary: Type.String({ description: "Exact new fold summary; an empty string is allowed." }),
+        }),
+        { minItems: 1, maxItems: 50, description: "Disjoint root ranges; the mutation is atomic." },
+      ),
+    }),
+    executionMode: "sequential",
+    async execute(_callId, params, _signal, _update, ctx) {
+      const state = current(ctx);
+      const requests = params.items.map((item) => ({
+        from: bareId(item.from),
+        to: item.to === undefined ? undefined : bareId(item.to),
+        summary: item.summary,
+      }));
+      const planned = planRootRanges(state.roots, state.originals, requests);
+      const existingIds = new Set(allItems(state.roots).map((item) => item.id));
+      const ids = planned.map(() => {
+        let id: string;
+        do id = `fold-${randomUUID().slice(0, 8)}`;
+        while (existingIds.has(id));
+        existingIds.add(id);
+        return id;
+      });
+      const ranges = planned.map((range, i) => ({ ...range, id: ids[i] }));
+      const before = visibleTokens(state.roots, state.byId);
+      const next = wrapRootRanges(state.roots, ranges);
+      const after = visibleTokens(next, state.byId);
+      persist(next);
+      const delta = after - before;
+      const effect = delta < 0 ? `freed ~${fmtTokens(-delta)} tokens` : delta > 0 ? `added ~${fmtTokens(delta)} tokens` : "no estimated context change";
+      return {
+        content: [{ type: "text", text: `Created ${ids.length} fold${ids.length === 1 ? "" : "s"}: ${ids.map((id) => `[#${id}]`).join(", ")} · ${effect}` }],
+        details: { ids, deltaTokens: delta },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "context_summary",
+    label: "Context summary",
+    description:
+      "Replace the summary of one currently visible root fold. Hidden fold summaries are immutable; an empty string clears the summary.",
+    parameters: Type.Object({
+      id: Type.String({ description: "Visible root fold id." }),
+      summary: Type.String({ description: "Exact replacement summary; empty clears it." }),
+    }),
+    executionMode: "sequential",
+    async execute(_callId, params, _signal, _update, ctx) {
+      const state = current(ctx);
+      const id = bareId(params.id);
+      const before = visibleTokens(state.roots, state.byId);
+      const next = replaceRootSummary(state.roots, id, params.summary);
+      const after = visibleTokens(next, state.byId);
+      persist(next);
+      const delta = after - before;
+      return {
+        content: [{ type: "text", text: `Updated [#${id}] summary · estimated live-context delta ${delta >= 0 ? "+" : ""}${delta} tokens` }],
+        details: { id, deltaTokens: delta },
+      };
     },
   });
 }
