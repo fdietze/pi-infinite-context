@@ -1,44 +1,65 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="520" height="396" viewBox="0 0 520 396" role="img" aria-labelledby="title description">
-  <title id="title">Short context, full history</title>
-  <desc id="description">The model sees a summary and the current work. Beneath the summary, the archive keeps an earlier summary and later messages. The earlier summary still contains its original messages. These saved contents can be searched and read without sending them all to the model.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="960" height="456" viewBox="0 0 960 456" role="img" aria-labelledby="title description">
+  <title id="title">A summary stands in for a range of messages</title>
+  <desc id="description">In order, the model sees a user message, a fold summary, another user message, an agent tool call, its tool result, and an agent message. The summary stands in for the saved range below: a user message, an earlier summary, an agent message, an agent tool call, its tool result, and another agent message. The earlier summary also keeps its original messages. All saved contents remain searchable and readable without unfolding.</desc>
 
-  <!-- KISS: one tree shows what is sent and what stays available, without repeating the same nodes. -->
+  <!-- KISS: one context row and its saved range show order, tool exchanges, and nesting without a second before/after view. -->
   <style>
-    text { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 20px; fill: #1f2328; }
+    text { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 22px; fill: #1f2328; }
     .heading { font-weight: 650; }
     .center { text-anchor: middle; }
     .note { font-size: 18px; fill: #59636e; }
     .message { fill: #f6f8fa; stroke: #8c959f; stroke-width: 1.5; }
     .summary { fill: #e4f5ed; stroke: #347d59; stroke-width: 1.5; }
-    .branch { fill: none; stroke: #8c959f; stroke-width: 2; }
+    .line { fill: none; stroke: #8c959f; stroke-width: 2; }
+    .range { fill: none; stroke: #347d59; stroke-width: 1.5; stroke-dasharray: 5 4; }
     .divider { stroke: #8c959f; stroke-width: 1; stroke-dasharray: 4 5; }
     @media (prefers-color-scheme: dark) {
       text { fill: #f0f6fc; }
       .note { fill: #b1bac4; }
       .message { fill: #212830; stroke: #919ba5; }
       .summary { fill: #19382f; stroke: #62b38f; }
-      .branch, .divider { stroke: #919ba5; }
+      .line, .divider { stroke: #919ba5; }
+      .range { stroke: #62b38f; }
     }
   </style>
 
-  <text class="heading" x="20" y="30">Sent to the model</text>
-  <rect class="summary" x="20" y="50" width="230" height="56" rx="7"/>
-  <text class="center" x="135" y="85">Summary</text>
-  <rect class="message" x="280" y="50" width="220" height="56" rx="7"/>
-  <text class="center" x="390" y="85">Current work</text>
+  <text class="heading" x="20" y="32">Sent to the model</text>
+  <text class="note" x="940" y="32" text-anchor="end">older → newer</text>
+  <path class="line" d="M 85 96 H 880"/>
+  <rect class="message" x="20" y="60" width="130" height="72" rx="7"/>
+  <text class="center" x="85" y="91">User<tspan class="note" x="85" dy="25">message</tspan></text>
+  <rect class="summary" x="170" y="60" width="180" height="72" rx="7"/>
+  <text class="center" x="260" y="103">Summary</text>
+  <rect class="message" x="370" y="60" width="130" height="72" rx="7"/>
+  <text class="center" x="435" y="91">User<tspan class="note" x="435" dy="25">message</tspan></text>
+  <rect class="message" x="520" y="60" width="130" height="72" rx="7"/>
+  <text class="center" x="585" y="91">Agent<tspan class="note" x="585" dy="25">tool call</tspan></text>
+  <rect class="message" x="670" y="60" width="130" height="72" rx="7"/>
+  <text class="center" x="735" y="91">Tool<tspan class="note" x="735" dy="25">result</tspan></text>
+  <rect class="message" x="820" y="60" width="120" height="72" rx="7"/>
+  <text class="center" x="880" y="91">Agent<tspan class="note" x="880" dy="25">message</tspan></text>
 
-  <path class="branch" d="M 135 106 V 206"/>
-  <line class="divider" x1="20" y1="138" x2="500" y2="138"/>
-  <text class="heading" x="280" y="178">Kept in the archive</text>
-  <!-- The Map Is Not the Territory: these children stay in the archive, not in the model input. -->
-  <path class="branch" d="M 135 206 V 226 M 135 206 H 390 V 226"/>
-  <rect class="summary" x="20" y="226" width="230" height="56" rx="7"/>
-  <text class="center" x="135" y="261">Earlier summary</text>
-  <rect class="message" x="280" y="226" width="220" height="56" rx="7"/>
-  <text class="center" x="390" y="261">Later messages</text>
+  <line class="divider" x1="20" y1="176" x2="940" y2="176"/>
+  <path class="line" d="M 260 132 V 238"/>
+  <text class="heading" x="370" y="213">Saved range · kept in order</text>
+  <!-- The Map Is Not the Territory: the linked range is preserved source, not additional model input. -->
+  <rect class="range" x="10" y="238" width="940" height="100" rx="10"/>
+  <path class="line" d="M 85 288 H 880"/>
+  <rect class="message" x="20" y="252" width="130" height="72" rx="7"/>
+  <text class="center" x="85" y="283">User<tspan class="note" x="85" dy="25">message</tspan></text>
+  <rect class="summary" x="170" y="252" width="180" height="72" rx="7"/>
+  <text class="center" x="260" y="283">Earlier<tspan x="260" dy="25">summary</tspan></text>
+  <rect class="message" x="370" y="252" width="130" height="72" rx="7"/>
+  <text class="center" x="435" y="283">Agent<tspan class="note" x="435" dy="25">message</tspan></text>
+  <rect class="message" x="520" y="252" width="130" height="72" rx="7"/>
+  <text class="center" x="585" y="283">Agent<tspan class="note" x="585" dy="25">tool call</tspan></text>
+  <rect class="message" x="670" y="252" width="130" height="72" rx="7"/>
+  <text class="center" x="735" y="283">Tool<tspan class="note" x="735" dy="25">result</tspan></text>
+  <rect class="message" x="820" y="252" width="120" height="72" rx="7"/>
+  <text class="center" x="880" y="283">Agent<tspan class="note" x="880" dy="25">message</tspan></text>
 
-  <path class="branch" d="M 135 282 V 320"/>
-  <rect class="message" x="20" y="320" width="230" height="56" rx="7"/>
-  <text class="center" x="135" y="355">Original messages</text>
-  <text class="note center" x="390" y="341">Search or read<tspan x="390" dy="25">only what you need.</tspan></text>
+  <path class="line" d="M 260 324 V 382"/>
+  <rect class="message" x="150" y="382" width="220" height="54" rx="7"/>
+  <text class="center" x="260" y="417">Earlier messages</text>
+  <text class="note" x="480" y="416">Search and read without unfolding.</text>
 </svg>
