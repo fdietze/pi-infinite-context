@@ -1,6 +1,7 @@
 # Repository map
 
-- `README.md`: user-facing purpose, installation, and compatibility boundary.
+- `README.md`: user-facing purpose, tools, context reminders, installation, and limits.
+- `docs/folding.svg`: recursive folding diagram embedded in the README.
 - `DESIGN.md`: authoritative fold-tree invariants and public tool semantics.
 - `extensions/infinite-context/index.ts`: Pi integration and tool registration.
 - `extensions/infinite-context/forest.ts`: pure recursive archive state and transforms.
