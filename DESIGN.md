@@ -54,7 +54,7 @@ Excluded bash entries remain searchable archive leaves but have zero live-contex
 
 ## Output safety
 
-All tools use one final UTF-8 byte/line cap. Map and lookup are paginated; previews and search lines are bounded. A giant single line is clipped explicitly without splitting a Unicode surrogate pair. Search emission is capped and asks the caller to refine the regex. No tool writes a recursive archive dump to model context.
+Map and search synthesize aggregate output that never lived in context as one unit, so they share a final UTF-8 byte/line cap; previews and search lines are bounded, and search emission is capped and asks the caller to refine the regex. Peek is exempt: it returns exactly one item, which is either an original message that already fit in context once or a schema-bounded fold summary, so it is returned whole and paged only by line offset/limit — a single over-long line is never clipped into an unreachable tail. No tool writes a recursive archive dump to model context.
 
 Token sizes are documented estimates. Fold and summary results report the signed estimated live-context delta, so a large summary may correctly report growth rather than false savings.
 

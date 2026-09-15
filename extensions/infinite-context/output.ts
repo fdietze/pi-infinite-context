@@ -8,7 +8,6 @@ export interface LineWindow {
   readonly totalLines: number;
   readonly start: number;
   readonly end: number;
-  readonly clippedLine: boolean;
 }
 
 function utf8Prefix(text: string, maxBytes: number): string {
@@ -27,37 +26,23 @@ function utf8Prefix(text: string, maxBytes: number): string {
   return text.slice(0, low);
 }
 
-/** File-read line semantics with a byte reserve for an explicit clipping notice. */
-export function lineWindow(
-  text: string,
-  offset = 1,
-  limit = DEFAULT_PAGE_LIMIT,
-  maxBytes = MAX_OUTPUT_BYTES,
-): LineWindow {
+/**
+ * Pure line windowing over an item's serialized text. No byte cap here: a peeked
+ * item is either an original message (which already fit in the model context once,
+ * so returning it whole cannot overflow anything new) or a schema-bounded fold
+ * summary. Reachability holds by construction — even a single over-long line is
+ * returned intact rather than clipped into an unreachable tail.
+ */
+export function lineWindow(text: string, offset = 1, limit = DEFAULT_PAGE_LIMIT): LineWindow {
   const lines = text.split("\n");
   if (offset > lines.length)
-    return { text: "", totalLines: lines.length, start: offset, end: offset - 1, clippedLine: false };
+    return { text: "", totalLines: lines.length, start: offset, end: offset - 1 };
   const selected = lines.slice(offset - 1, offset - 1 + limit);
-  const joined = selected.join("\n");
-  if (Buffer.byteLength(joined, "utf8") <= maxBytes) {
-    return {
-      text: joined,
-      totalLines: lines.length,
-      start: offset,
-      end: offset + selected.length - 1,
-      clippedLine: false,
-    };
-  }
-  const marker = "… [line clipped by output byte cap]";
-  const prefix = utf8Prefix(joined, Math.max(0, maxBytes - Buffer.byteLength(marker, "utf8")));
-  const complete = prefix.split("\n");
-  const clippedLine = !prefix.endsWith("\n");
   return {
-    text: `${prefix}${marker}`,
+    text: selected.join("\n"),
     totalLines: lines.length,
     start: offset,
-    end: offset + Math.max(1, complete.length) - 1,
-    clippedLine,
+    end: offset + selected.length - 1,
   };
 }
 

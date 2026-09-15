@@ -32,7 +32,6 @@ import { planNudge } from "./nudge.ts";
 import {
   DEFAULT_PAGE_LIMIT,
   MAX_PAGE_LIMIT,
-  MAX_OUTPUT_BYTES,
   boundOutput,
   lineWindow,
   parsePage,
@@ -252,7 +251,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
     label: "Context peek",
     description:
       `Read one original message's serialized text or exactly one fold's summary without changing context. ` +
-      `Uses 1-based line windows (default ${DEFAULT_PAGE_LIMIT}); every result reports total item lines. Output is capped at ${MAX_OUTPUT_BYTES} UTF-8 bytes, so a giant line may be clipped.`,
+      `Uses 1-based line windows (default ${DEFAULT_PAGE_LIMIT}); every result reports total item lines. The item is returned whole — it already fit in context once — so page with offset/limit to bound what you pull back.`,
     parameters: Type.Object({
       id: IdParam("Stable message or fold id from context_map or context_search."),
       ...PageParams,
@@ -266,12 +265,13 @@ export default function infiniteContext(pi: ExtensionAPI) {
       if (!item) throw new Error("Unknown node id");
       const page = parsePage(params.offset, params.limit);
       const text = item.kind === "fold" ? item.summary : serializeMessage(state.byId.get(item.id)!.message);
-      const window = lineWindow(text, page.offset, page.limit, MAX_OUTPUT_BYTES - 500);
+      const window = lineWindow(text, page.offset, page.limit);
       const kind = item.kind === "fold" ? "fold summary" : state.byId.get(item.id)!.message.role;
       const range = window.end >= window.start ? `${window.start}-${window.end}` : "none";
-      const footer = `[#${id}] ${kind} · lines ${range} of ${window.totalLines}${window.clippedLine ? " · current line clipped by byte cap" : ""}`;
+      const footer = `[#${id}] ${kind} · lines ${range} of ${window.totalLines}`;
+      // No boundOutput here: peek deliberately returns one already-context-sized item in full.
       return {
-        content: [{ type: "text", text: boundOutput(`${window.text}${window.text ? "\n" : ""}${footer}`) }],
+        content: [{ type: "text", text: `${window.text}${window.text ? "\n" : ""}${footer}` }],
         details: { id, kind, totalLines: window.totalLines, start: window.start, end: window.end },
       };
     },

@@ -48,24 +48,22 @@ test("line windows use exact newline semantics and report out-of-range offsets",
     totalLines: 2,
     start: 1,
     end: 2,
-    clippedLine: false,
   });
   assert.deepEqual(lineWindow("a\nb", 3, 1), {
     text: "",
     totalLines: 2,
     start: 3,
     end: 2,
-    clippedLine: false,
   });
 });
 
-test("giant Unicode lines are byte-bounded and clipping is explicit", () => {
-  const window = lineWindow("😀".repeat(100_000), 1, 1, 1000);
-  assert.ok(Buffer.byteLength(window.text, "utf8") <= 1000);
-  assert.match(window.text, /line clipped/);
+test("a single over-long line is returned whole, never clipped into an unreachable tail", () => {
+  const line = "😀".repeat(100_000);
+  const window = lineWindow(line, 1, 1);
+  assert.equal(window.text, line);
   assert.equal(window.totalLines, 1);
-  assert.equal(window.clippedLine, true);
-  assert.doesNotMatch(window.text, /�/);
+  assert.equal(window.start, 1);
+  assert.equal(window.end, 1);
 });
 
 test("global output defense applies one byte and line budget", () => {
