@@ -1,50 +1,18 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import {
+  estimateTokens,
+  sessionEntryToContextMessages,
+  type SessionEntry,
+} from "@earendil-works/pi-coding-agent";
 import type { Forest, Item } from "./forest.ts";
 import { originalIds } from "./forest.ts";
 
-export type Content = string | Array<Record<string, unknown>>;
-
-export interface AgentMessageLike {
-  role: string;
-  content?: Content;
-  timestamp?: number;
-  details?: unknown;
-  toolCallId?: string;
-  toolName?: string;
-  isError?: boolean;
-  command?: string;
-  output?: string;
-  summary?: string;
-  fromId?: string;
-  tokensBefore?: number;
-  customType?: string;
-  display?: boolean;
-  excludeFromContext?: boolean;
-  exitCode?: number | null;
-  cancelled?: boolean;
-  truncated?: boolean;
-  fullOutputPath?: string;
-}
-
-export interface BranchEntry {
-  type: string;
-  id?: string;
-  timestamp?: string;
-  customType?: string;
-  data?: unknown;
-  message?: AgentMessageLike;
-  content?: Content;
-  display?: boolean;
-  details?: unknown;
-  summary?: string;
-  fromId?: string;
-}
-
 export interface OriginalMessage {
   readonly id: string;
-  readonly message: AgentMessageLike;
+  readonly message: AgentMessage;
 }
 
-const ADDRESSABLE_ROLES = new Set([
+const ADDRESSABLE_ROLES = new Set<AgentMessage["role"]>([
   "user",
   "assistant",
   "toolResult",
@@ -53,41 +21,26 @@ const ADDRESSABLE_ROLES = new Set([
   "branchSummary",
 ]);
 
-/** Convert raw current-branch entries without applying native compaction. */
-export function branchOriginals(branch: readonly BranchEntry[]): OriginalMessage[] {
+/** Project raw current-branch entries with Pi's public session conversion. */
+export function branchOriginals(branch: readonly SessionEntry[]): OriginalMessage[] {
   const output: OriginalMessage[] = [];
   for (const entry of branch) {
-    if (!entry.id) continue;
-    let message: AgentMessageLike | undefined;
-    if (entry.type === "message") message = entry.message;
-    else if (entry.type === "custom_message") {
-      message = {
-        role: "custom",
-        customType: entry.customType,
-        content: entry.content ?? [],
-        display: entry.display,
-        details: entry.details,
-        timestamp: entry.timestamp ? new Date(entry.timestamp).getTime() : undefined,
-      };
-    } else if (entry.type === "branch_summary" && typeof entry.summary === "string") {
-      message = {
-        role: "branchSummary",
-        summary: entry.summary,
-        fromId: entry.fromId,
-        timestamp: entry.timestamp ? new Date(entry.timestamp).getTime() : undefined,
-      };
-    }
+    const messages = sessionEntryToContextMessages(entry);
+    // A forest leaf owns one session entry id. Pi currently projects zero or one
+    // message per entry; reject an SDK semantic change rather than aliasing an id.
+    if (messages.length > 1)
+      throw new Error("A session entry projected to multiple context messages");
+    const message = messages[0];
     if (message && ADDRESSABLE_ROLES.has(message.role))
       output.push({ id: entry.id, message });
   }
   return output;
 }
 
-const IMAGE_ESTIMATED_CHARS = 4800;
-
 /** Authoritative text projection shared by lookup and search. Binary image bytes stay in the session source. */
-export function serializeMessage(message: AgentMessageLike): string {
-  if (message.role === "branchSummary") return message.summary ?? "";
+export function serializeMessage(message: AgentMessage): string {
+  if (message.role === "branchSummary" || message.role === "compactionSummary")
+    return message.summary;
   if (message.role === "bashExecution") {
     let text = `Ran \`${message.command ?? ""}\`\n`;
     text += message.output ? `\`\`\`\n${message.output}\n\`\`\`` : "(no output)";
@@ -102,41 +55,21 @@ export function serializeMessage(message: AgentMessageLike): string {
   if (!Array.isArray(message.content)) return "";
   const parts: string[] = [];
   for (const block of message.content) {
-    if (typeof block.text === "string") parts.push(block.text);
-    else if (typeof block.thinking === "string") parts.push(`(thinking) ${block.thinking}`);
+    if (block.type === "text") parts.push(block.text);
+    else if (block.type === "thinking") parts.push(`(thinking) ${block.thinking}`);
     else if (block.type === "toolCall")
-      parts.push(`(call ${String(block.name ?? "?")} ${JSON.stringify(block.arguments ?? {})})`);
+      parts.push(`(call ${block.name} ${JSON.stringify(block.arguments)})`);
     else if (block.type === "image")
-      parts.push(`(image ${String(block.mimeType ?? block.mediaType ?? "unknown type")}; binary source preserved in session)`);
+      parts.push(`(image ${block.mimeType}; binary source preserved in session)`);
   }
   return parts.join("\n");
 }
 
-/** Pi-compatible rough estimate without pretending provider-exact tokenization. */
-export function estimateContextTokens(message: AgentMessageLike): number {
-  if (message.role === "bashExecution" && message.excludeFromContext) return 0;
-  let chars = 0;
-  if (["user", "custom", "toolResult"].includes(message.role)) {
-    if (typeof message.content === "string") chars = message.content.length;
-    else if (Array.isArray(message.content)) {
-      for (const block of message.content) {
-        if (typeof block.text === "string") chars += block.text.length;
-        else if (block.type === "image") chars += IMAGE_ESTIMATED_CHARS;
-      }
-    }
-  } else if (message.role === "assistant" && Array.isArray(message.content)) {
-    for (const block of message.content) {
-      if (typeof block.text === "string") chars += block.text.length;
-      else if (typeof block.thinking === "string") chars += block.thinking.length;
-      else if (block.type === "toolCall") {
-        chars += typeof block.name === "string" ? block.name.length : 0;
-        chars += JSON.stringify(block.arguments ?? {}).length;
-      }
-    }
-  } else if (message.role === "bashExecution") {
-    chars = (message.command?.length ?? 0) + (message.output?.length ?? 0);
-  } else if (message.role === "branchSummary") chars = message.summary?.length ?? 0;
-  return Math.ceil(chars / 4);
+/** Pi's estimate, except content that Pi explicitly excludes from provider context. */
+export function estimateContextTokens(message: AgentMessage): number {
+  return message.role === "bashExecution" && message.excludeFromContext
+    ? 0
+    : estimateTokens(message);
 }
 
 interface UnitBounds {
@@ -276,10 +209,10 @@ export function planRootRanges(
 
 /** Overlay only the request copy; raw session messages remain untouched. */
 export function buildOverlay(
-  messages: AgentMessageLike[],
+  messages: AgentMessage[],
   originals: readonly OriginalMessage[],
   roots: Forest,
-): AgentMessageLike[] {
+): AgentMessage[] {
   const byId = new Map(originals.map((original) => [original.id, original] as const));
   // Excluded bash entries remain searchable archive sources but cannot anchor a
   // synthetic fold projection: Pi would otherwise receive content it excluded.
@@ -299,8 +232,8 @@ export function buildOverlay(
   const customQueues = new Map<string, string[]>();
   const customOriginalCounts = new Map<string, number>();
   const available = new Set(originals.map(({ id }) => id));
-  const customKey = (message: AgentMessageLike) =>
-    `${message.customType}|${serializeMessage(message)}`;
+  const customKey = (message: AgentMessage) =>
+    `${message.role === "custom" ? message.customType : ""}|${serializeMessage(message)}`;
   const foldedCallIds = new Set<string>();
   for (const { id, message } of originals) {
     const key = `${message.timestamp}|${message.role}`;
@@ -334,7 +267,7 @@ export function buildOverlay(
     }
     return undefined;
   };
-  const output: AgentMessageLike[] = [];
+  const output: AgentMessage[] = [];
   for (const message of messages) {
     if (message.role === "toolResult" && message.toolCallId && foldedCallIds.has(message.toolCallId))
       continue;

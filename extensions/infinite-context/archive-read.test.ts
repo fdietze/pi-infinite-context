@@ -3,11 +3,12 @@ import { test } from "node:test";
 import { messageItem, wrapRootRanges } from "./forest.ts";
 import type { OriginalMessage } from "./messages.ts";
 import { boundOutput, lineWindow, MAX_OUTPUT_BYTES, parsePage } from "./output.ts";
+import { assistantMessage, userMessage } from "./pi-test-fixtures.ts";
 import { compilePattern, searchArchive } from "./search.ts";
 
 const originals: OriginalMessage[] = [
-  { id: "m1", message: { role: "user", content: "alpha\nneedle original", timestamp: 1 } },
-  { id: "m2", message: { role: "assistant", content: [{ type: "text", text: "other" }], timestamp: 2 } },
+  { id: "m1", message: userMessage("alpha\nneedle original", 1) },
+  { id: "m2", message: assistantMessage([{ type: "text", text: "other" }], 2) },
 ];
 
 const roots = wrapRootRanges(originals.map(({ id }) => messageItem(id)), [
@@ -30,7 +31,7 @@ test("search scans each original and reachable fold summary with lookup-compatib
 
 test("search previews do not split Unicode surrogate pairs", () => {
   const unicode: OriginalMessage[] = [
-    { id: "emoji", message: { role: "user", content: `${"😀".repeat(100)}needle${"😀".repeat(100)}`, timestamp: 1 } },
+    { id: "emoji", message: userMessage(`${"😀".repeat(100)}needle${"😀".repeat(100)}`) },
   ];
   const result = searchArchive(unicode, [messageItem("emoji")], compilePattern("needle"));
   assert.doesNotMatch(result.hits[0].matches[0].text, /�/);

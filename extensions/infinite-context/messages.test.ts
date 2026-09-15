@@ -1,33 +1,72 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { messageItem, originalIds, wrapRootRanges } from "./forest.ts";
 import {
-  type AgentMessageLike,
   type OriginalMessage,
+  branchOriginals,
   buildOverlay,
+  estimateContextTokens,
   planRootRanges,
   serializeMessage,
   unitBounds,
   validateToolUnitOwnership,
 } from "./messages.ts";
+import {
+  assistantMessage,
+  bashMessage,
+  customMessage,
+  messageEntry,
+  toolResultMessage,
+  userMessage,
+} from "./pi-test-fixtures.ts";
 
-const msg = (id: string, role: string, content: AgentMessageLike["content"], extra: Partial<AgentMessageLike> = {}): OriginalMessage => ({
-  id,
-  message: { role, content, timestamp: Number(id.replace(/\D/g, "")) || id.charCodeAt(0), ...extra },
-});
+const original = (id: string, message: AgentMessage): OriginalMessage => ({ id, message });
 
 function completedTools(): OriginalMessage[] {
   return [
-    msg("u0", "user", "read both"),
-    msg("a1", "assistant", [
+    original("u0", userMessage("read both", 1)),
+    original("a1", assistantMessage([
       { type: "toolCall", id: "c1", name: "read", arguments: { path: "a" } },
       { type: "toolCall", id: "c2", name: "read", arguments: { path: "b" } },
-    ]),
-    msg("r2", "toolResult", [{ type: "text", text: "A" }], { toolCallId: "c1" }),
-    msg("r3", "toolResult", [{ type: "text", text: "B" }], { toolCallId: "c2" }),
-    msg("a4", "assistant", [{ type: "text", text: "done" }]),
+    ], 2)),
+    original("r2", toolResultMessage("c1", "A", 3)),
+    original("r3", toolResultMessage("c2", "B", 4)),
+    original("a4", assistantMessage([{ type: "text", text: "done" }], 5)),
   ];
 }
+
+test("Pi session projection preserves entry ids and omits zero-message entries", () => {
+  const ignored: SessionEntry = {
+    type: "model_change",
+    id: "metadata",
+    parentId: null,
+    timestamp: new Date(0).toISOString(),
+    provider: "test",
+    modelId: "test",
+  };
+  const emptyBranchSummary = {
+    type: "branch_summary",
+    id: "empty-summary",
+    parentId: "metadata",
+    timestamp: new Date(1).toISOString(),
+    fromId: "user",
+    summary: "",
+  } satisfies SessionEntry;
+  const entries = [ignored, emptyBranchSummary, messageEntry("user", userMessage("hello")), {
+    type: "custom_message",
+    id: "custom",
+    parentId: "user",
+    timestamp: new Date(2).toISOString(),
+    customType: "notice",
+    content: "remember",
+    display: true,
+  } satisfies SessionEntry];
+  const projected = branchOriginals(entries);
+  assert.deepEqual(projected.map(({ id }) => id), ["user", "custom"]);
+  assert.deepEqual(projected.map(({ message }) => message.role), ["user", "custom"]);
+});
 
 test("tool bounds group parallel calls with all results", () => {
   const bounds = unitBounds(completedTools());
@@ -88,77 +127,80 @@ test("overlay preserves live object identity and drops folded call results", () 
     originals.map(({ id }) => messageItem(id)),
     [{ first: 1, last: 3, id: "fold-x", summary: "files read" }],
   );
-  const request = originals.map(({ message }) => ({ ...message }));
+  const request = originals.map(({ message }) => ({ ...message })) as AgentMessage[];
   const output = buildOverlay(request, originals, roots);
   assert.equal(output[0], request[0]);
   assert.equal(output.length, 3);
   assert.equal(output[1].role, "user");
-  assert.equal(output[1].content, "files read");
+  assert.equal(output[1].role === "user" && output[1].content, "files read");
   assert.equal(output[2], request[4]);
-  assert.ok(output.every((message) => message.toolCallId !== "c1" && message.toolCallId !== "c2"));
+  assert.ok(output.every((message) => message.role !== "toolResult"));
 });
 
-test("overlay correlates persisted custom messages despite independently-created timestamps", () => {
-  const originals: OriginalMessage[] = [
-    { id: "custom", message: { role: "custom", customType: "nudge", content: "notice", timestamp: 1000 } },
-  ];
+test("overlay correlates persisted custom messages despite independent timestamps", () => {
+  const originals = [original("custom", customMessage("nudge", "notice", 1000))];
   const roots = wrapRootRanges([messageItem("custom")], [
     { first: 0, last: 0, id: "fold-custom", summary: "archived notice" },
   ]);
-  const output = buildOverlay(
-    [{ role: "custom", customType: "nudge", content: "notice", timestamp: 999 }],
-    originals,
-    roots,
-  );
-  assert.equal(output.length, 1);
-  assert.equal(output[0].content, "archived notice");
+  const output = buildOverlay([customMessage("nudge", "notice", 999)], originals, roots);
+  assert.equal(output[0].role === "user" && output[0].content, "archived notice");
 });
 
 test("ambiguous injected custom duplicates are preserved instead of mis-correlated", () => {
-  const original = { role: "custom", customType: "nudge", content: "same", timestamp: 1000 };
-  const originals: OriginalMessage[] = [{ id: "custom", message: original }];
+  const source = customMessage("nudge", "same", 1000);
+  const originals = [original("custom", source)];
   const roots = wrapRootRanges([messageItem("custom")], [
     { first: 0, last: 0, id: "fold-custom", summary: "archived" },
   ]);
-  const injected = { ...original, timestamp: 999 };
-  const output = buildOverlay([injected, { ...original, timestamp: 998 }], originals, roots);
+  const output = buildOverlay(
+    [customMessage("nudge", "same", 999), customMessage("nudge", "same", 998)],
+    originals,
+    roots,
+  );
   assert.equal(output.length, 2);
-  assert.ok(output.every((message) => message.content === "same"));
+  assert.ok(output.every((message) => message.role === "custom" && message.content === "same"));
 });
 
-test("excluded bash remains searchable state but never anchors a fold projection", () => {
-  const originals: OriginalMessage[] = [
-    { id: "bash", message: { role: "bashExecution", command: "secret", output: "hidden", excludeFromContext: true, timestamp: 1 } },
-  ];
+test("token estimates delegate to Pi and exclude hidden bash context", async () => {
+  const { estimateTokens } = await import("@earendil-works/pi-coding-agent");
+  const visible = userMessage("12345");
+  assert.equal(estimateContextTokens(visible), estimateTokens(visible));
+
+  const message = bashMessage("secret", "hidden", 1, true);
+  const originals = [original("bash", message)];
   const roots = wrapRootRanges([messageItem("bash")], [
     { first: 0, last: 0, id: "fold-bash", summary: "must not enter context" },
   ]);
-  const output = buildOverlay([{ ...originals[0].message }], originals, roots);
-  assert.deepEqual(output, [], "Pi excluded the source, so folding cannot inject a replacement");
+  assert.equal(estimateContextTokens(message), 0);
+  assert.deepEqual(buildOverlay([message], originals, roots), []);
 });
 
-test("overlay keeps unknown messages injected by later or earlier extensions", () => {
+test("overlay keeps unknown messages injected by other extensions", () => {
   const originals = completedTools();
-  const injected = { role: "custom-other", content: "keep me", timestamp: 999 };
+  const injected = { role: "custom-other", content: "keep me", timestamp: 999 } as unknown as AgentMessage;
   const output = buildOverlay(
-    [...originals.map(({ message }) => ({ ...message })), injected],
+    [...originals.map(({ message }) => ({ ...message }) as AgentMessage), injected],
     originals,
     originals.map(({ id }) => messageItem(id)),
   );
   assert.equal(output.at(-1), injected);
 });
 
-test("serializer labels images honestly and shares stable lines", () => {
+test("serializer labels binary images honestly and preserves stable lines", () => {
   const text = serializeMessage({
-    role: "assistant",
+    role: "user",
     content: [
-      { type: "thinking", thinking: "private reasoning" },
       { type: "image", mimeType: "image/png", data: "bytes" },
       { type: "text", text: "answer" },
     ],
+    timestamp: 1,
   });
+  assert.equal(text, "(image image/png; binary source preserved in session)\nanswer");
   assert.equal(
-    text,
-    "(thinking) private reasoning\n(image image/png; binary source preserved in session)\nanswer",
+    serializeMessage(assistantMessage([
+      { type: "thinking", thinking: "private reasoning" },
+      { type: "text", text: "answer" },
+    ])),
+    "(thinking) private reasoning\nanswer",
   );
 });
