@@ -5,9 +5,21 @@ import {
   type ToolCall,
   validateToolArguments,
 } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  SessionEntry,
+} from "@earendil-works/pi-coding-agent";
 import infiniteContext from "./index.ts";
-import type { AgentMessageLike, BranchEntry } from "./messages.ts";
+import { MAX_OUTPUT_BYTES } from "./output.ts";
+import {
+  assistantMessage,
+  bashMessage,
+  messageEntry,
+  toolResultMessage,
+  userMessage,
+} from "./pi-test-fixtures.ts";
 
 type Handler = (event: Record<string, unknown>, ctx: ExtensionContext) => Promise<unknown>;
 type RegisteredTool = {
@@ -25,7 +37,7 @@ type RegisteredTool = {
   ) => Promise<{ content: Array<{ type: string; text: string }>; details?: unknown }>;
 };
 
-function harness(initial: BranchEntry[]) {
+function harness(initial: SessionEntry[]) {
   let entries = [...initial];
   const handlers = new Map<string, Handler[]>();
   const tools = new Map<string, RegisteredTool>();
@@ -41,7 +53,14 @@ function harness(initial: BranchEntry[]) {
       tools.set(tool.name, tool);
     },
     appendEntry(customType: string, data: unknown) {
-      entries.push({ type: "custom", id: `state-${++appended}`, customType, data });
+      entries.push({
+        type: "custom",
+        id: `state-${++appended}`,
+        parentId: entries.at(-1)?.id ?? null,
+        timestamp: new Date(appended).toISOString(),
+        customType,
+        data,
+      });
     },
     sendMessage() {},
   } as unknown as ExtensionAPI;
@@ -56,7 +75,7 @@ function harness(initial: BranchEntry[]) {
     notifications,
     ctx,
     entries: () => entries,
-    setEntries(next: BranchEntry[]) {
+    setEntries(next: SessionEntry[]) {
       entries = next;
     },
     async emit(name: string, event: Record<string, unknown> = {}) {
@@ -67,11 +86,17 @@ function harness(initial: BranchEntry[]) {
   };
 }
 
-const entry = (id: string, role: string, content: AgentMessageLike["content"], timestamp: number): BranchEntry => ({
-  type: "message",
+const entry = (
+  id: string,
+  role: "user" | "assistant",
+  content: string | Extract<AgentMessage, { role: "assistant" }>["content"],
+  timestamp: number,
+): SessionEntry => messageEntry(
   id,
-  message: { role, content, timestamp },
-});
+  role === "user"
+    ? userMessage(content as string, timestamp)
+    : assistantMessage(content as Extract<AgentMessage, { role: "assistant" }>["content"], timestamp),
+);
 
 test("registers the approved five-tool surface in sequential mode", () => {
   const h = harness([]);
@@ -109,13 +134,16 @@ test("fold persists v2, overlays one summary, and reloads its own snapshot", asy
   );
   assert.match(result.content[0].text, /Created 1 fold/);
   const saved = h.entries().at(-1)!;
-  assert.equal((saved.data as { version: number }).version, 2);
+  assert.equal(saved.type === "custom" && (saved.data as { version: number }).version, 2);
 
   const overlay = (await h.emit("context", {
-    messages: source.map((sourceEntry) => ({ ...(sourceEntry.message as AgentMessageLike) })),
-  })) as { messages: AgentMessageLike[] };
+    messages: source.map((sourceEntry) => ({ ...(sourceEntry.type === "message" && sourceEntry.message) })),
+  })) as { messages: AgentMessage[] };
   assert.equal(overlay.messages.length, 1);
-  assert.equal(overlay.messages[0].content, "both");
+  assert.equal(
+    overlay.messages[0].role === "user" && overlay.messages[0].content,
+    "both",
+  );
 
   await h.emit("session_start", { reason: "reload" });
   const map = await h.tools.get("context_map")!.execute("map", {}, undefined, undefined, h.ctx);
@@ -148,17 +176,7 @@ test("new originals append after a fold; tree navigation reconstructs branch-loc
 
 test("folding only excluded bash reports the actual zero provider-context delta", async () => {
   const h = harness([
-    {
-      type: "message",
-      id: "bash",
-      message: {
-        role: "bashExecution",
-        command: "secret",
-        output: "hidden",
-        excludeFromContext: true,
-        timestamp: 1,
-      },
-    },
+    messageEntry("bash", bashMessage("secret", "hidden", 1, true)),
   ]);
   await h.emit("session_start");
   const result = await h.tools.get("context_fold")!.execute(
@@ -171,9 +189,9 @@ test("folding only excluded bash reports the actual zero provider-context delta"
   assert.match(result.content[0].text, /no estimated context change/);
 });
 
-test("argument preparation bounds Pi schema-validation errors", () => {
+test("generic argument budget bounds the real Pi validation-error path", () => {
   const h = harness([entry("u1", "user", "one", 1)]);
-  const runtimeValidationError = (name: string, arguments_: Record<string, unknown>) => {
+  const validate = (name: string, arguments_: unknown) => {
     const tool = h.tools.get(name)!;
     const prepared = tool.prepareArguments?.(arguments_) ?? arguments_;
     const call: ToolCall = {
@@ -182,35 +200,54 @@ test("argument preparation bounds Pi schema-validation errors", () => {
       name,
       arguments: prepared as Record<string, unknown>,
     };
-    try {
-      validateToolArguments(tool as unknown as AiTool, call);
-      assert.fail("expected schema validation failure");
-    } catch (error) {
-      return `Error: ${(error as Error).message}`;
-    }
+    return validateToolArguments(tool as unknown as AiTool, call);
   };
-  const huge = "x".repeat(200_000);
+  const validationError = (name: string, arguments_: unknown) => {
+    let caught: Error | undefined;
+    try {
+      validate(name, arguments_);
+    } catch (error) {
+      caught = error as Error;
+    }
+    assert.ok(caught, "expected schema validation failure");
+    return `Error: ${caught.message}`;
+  };
+
+  // Valid provider JSON passes preparation unchanged, including the largest ASCII summary.
+  assert.deepEqual(validate("context_map", {}), {});
+  assert.deepEqual(validate("context_peek", { id: "u1", offset: 1, limit: 100 }), {
+    id: "u1",
+    offset: 1,
+    limit: 100,
+  });
+  assert.deepEqual(validate("context_search", { patterns: ["needle"] }), {
+    patterns: ["needle"],
+  });
+  assert.deepEqual(validate("context_summary", { id: "fold", summary: "x".repeat(12_000) }), {
+    id: "fold",
+    summary: "x".repeat(12_000),
+  });
+
+  const huge = "😀\n\\\"".repeat(50_000);
   const errors = [
-    runtimeValidationError("context_peek", { id: huge }),
-    runtimeValidationError("context_search", { patterns: [`(${huge}`] }),
-    runtimeValidationError("context_summary", { id: "fold", summary: huge }),
-    runtimeValidationError("context_fold", {
-      items: [{ from: "u1", summary: huge }],
-    }),
-    runtimeValidationError("context_search", {
-      patterns: Array.from({ length: 20 }, () => "y".repeat(1000)),
-    }),
-    runtimeValidationError("context_fold", {
-      items: Array.from({ length: 50 }, () => ({
-        from: "u1",
-        summary: "y".repeat(1000),
-      })),
-    }),
+    validationError("context_peek", null),
+    validationError("context_peek", {}),
+    validationError("context_search", { patterns: {} }),
+    validationError("context_fold", { items: Array.from({ length: 1000 }, () => ({})) }),
+    // This stays just below the guard and maximizes per-element TypeBox paths.
+    validationError("context_search", { patterns: Array.from({ length: 6130 }, () => 0) }),
+    validationError("context_summary", { summary: "x".repeat(12_000) }),
+    validationError("context_summary", { summary: "😀\n\\\"".repeat(1000) }),
+    validationError("context_peek", { id: huge }),
+    validationError("context_search", { patterns: [huge] }),
+    validationError("context_fold", { items: [{ from: "u1", summary: huge }] }),
   ];
-  for (const error of errors) {
-    assert.ok(Buffer.byteLength(error, "utf8") < 1024);
-    assert.doesNotMatch(error, new RegExp("x{100}"));
-  }
+  for (const error of errors)
+    assert.ok(
+      Buffer.byteLength(error, "utf8") < MAX_OUTPUT_BYTES,
+      `validation error exceeded ${MAX_OUTPUT_BYTES} bytes`,
+    );
+  assert.doesNotMatch(errors.at(-1)!, /😀{100}/);
 });
 
 test("reload rejects v2 snapshots that split or hide unfinished tool units", async () => {
@@ -220,23 +257,15 @@ test("reload rejects v2 snapshots that split or hide unfinished tool units", asy
     [{ type: "toolCall", id: "call", name: "read", arguments: {} }],
     1,
   );
-  const result: BranchEntry = {
-    type: "message",
-    id: "r1",
-    message: {
-      role: "toolResult",
-      toolCallId: "call",
-      toolName: "read",
-      content: [{ type: "text", text: "done" }],
-      timestamp: 2,
-    },
-  };
+  const result = messageEntry("r1", toolResultMessage("call", "done", 2));
   const split = harness([
     assistant,
     result,
     {
       type: "custom",
       id: "state",
+      parentId: "r1",
+      timestamp: new Date(3).toISOString(),
       customType: "infinite-context",
       data: {
         version: 2,
@@ -255,6 +284,8 @@ test("reload rejects v2 snapshots that split or hide unfinished tool units", asy
     {
       type: "custom",
       id: "state",
+      parentId: "a1",
+      timestamp: new Date(2).toISOString(),
       customType: "infinite-context",
       data: {
         version: 2,
@@ -271,7 +302,14 @@ test("reload rejects v2 snapshots that split or hide unfinished tool units", asy
 test("old snapshots and pre-compacted sessions are rejected rather than interpreted", async () => {
   const old = harness([
     entry("u1", "user", "one", 1),
-    { type: "custom", id: "old", customType: "infinite-context", data: { spans: [] } },
+    {
+      type: "custom",
+      id: "old",
+      parentId: "u1",
+      timestamp: new Date(2).toISOString(),
+      customType: "infinite-context",
+      data: { spans: [] },
+    },
   ]);
   await old.emit("session_start");
   assert.match(old.notifications[0], /Unsupported.*start a new session/);
@@ -280,7 +318,15 @@ test("old snapshots and pre-compacted sessions are rejected rather than interpre
     /Unsupported/,
   );
 
-  const compacted = harness([{ type: "compaction", id: "c", summary: "native" }]);
+  const compacted = harness([{
+    type: "compaction",
+    id: "c",
+    parentId: null,
+    timestamp: new Date(1).toISOString(),
+    summary: "native",
+    firstKeptEntryId: "c",
+    tokensBefore: 1,
+  }]);
   await compacted.emit("session_start");
   assert.match(compacted.notifications[0], /already contains native compaction/);
 });

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type {
   ExtensionAPI,
   ExtensionContext,
+  SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
@@ -19,8 +20,6 @@ import {
   wrapRootRanges,
 } from "./forest.ts";
 import {
-  type AgentMessageLike,
-  type BranchEntry,
   type OriginalMessage,
   branchOriginals,
   buildOverlay,
@@ -48,113 +47,21 @@ import {
 const MAX_ID_LENGTH = 128;
 const MAX_PATTERN_LENGTH = 4096;
 const MAX_SUMMARY_LENGTH = 12_000;
-const MAX_PREPARED_ARGUMENT_BYTES = 16 * 1024;
+// Leave headroom for TypeBox's per-item error paths and pretty-printed argument echo
+// while still admitting the schema's 12,000-character ASCII summary.
+const MAX_PREPARED_ARGUMENT_BYTES = 12 * 1024;
 const bareId = (id: string) => id.replace(/^#/, "");
 const IdParam = (description: string) =>
   Type.String({ description, minLength: 1, maxLength: MAX_ID_LENGTH });
 const SummaryParam = (description: string) =>
   Type.String({ description, maxLength: MAX_SUMMARY_LENGTH });
 
-const asObject = (value: unknown): Record<string, unknown> | undefined =>
-  value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : undefined;
-// Invalid sentinels deliberately retain the public static type: TypeBox rejects
-// their runtime type after Pi has discarded the original unbounded arguments.
-const safeString = (value: unknown, maximum: number): string =>
-  typeof value === "string" && value.length <= maximum
-    ? value
-    : (0 as unknown as string);
-const safeNumber = (value: unknown): number =>
-  typeof value === "number" ? value : 0;
-const preparedPage = (value: Record<string, unknown>) => ({
-  ...(value.offset === undefined ? {} : { offset: safeNumber(value.offset) }),
-  ...(value.limit === undefined ? {} : { limit: safeNumber(value.limit) }),
-});
-const withinArgumentBudget = <T>(value: T, invalid: T): T =>
-  Buffer.byteLength(JSON.stringify(value), "utf8") <= MAX_PREPARED_ARGUMENT_BYTES
-    ? value
-    : invalid;
-
-/** Pi echoes prepared arguments on schema errors, so preparation must bound them before validation. */
-function prepareMapArguments(value: unknown) {
-  const input = asObject(value);
-  if (!input) return { offset: 0 };
-  return withinArgumentBudget(
-    {
-      ...(input.id === undefined ? {} : { id: safeString(input.id, MAX_ID_LENGTH) }),
-      ...preparedPage(input),
-    },
-    { offset: 0 },
-  );
-}
-
-function preparePeekArguments(value: unknown) {
-  const input = asObject(value);
-  if (!input) return { id: safeString(undefined, MAX_ID_LENGTH) };
-  return withinArgumentBudget(
-    { id: safeString(input.id, MAX_ID_LENGTH), ...preparedPage(input) },
-    { id: safeString(undefined, MAX_ID_LENGTH) },
-  );
-}
-
-function prepareSearchArguments(value: unknown) {
-  const input = asObject(value);
-  if (!input || !Array.isArray(input.patterns) || input.patterns.length > 20)
-    return { patterns: [] };
-  return withinArgumentBudget(
-    {
-      patterns: input.patterns.map((pattern) =>
-        safeString(pattern, MAX_PATTERN_LENGTH),
-      ),
-    },
-    { patterns: [] },
-  );
-}
-
-function prepareFoldArguments(value: unknown) {
-  const input = asObject(value);
-  if (!input || !Array.isArray(input.items) || input.items.length > 50)
-    return { items: [] };
-  return withinArgumentBudget(
-    {
-      items: input.items.map((value) => {
-        const item = asObject(value);
-        if (!item)
-          return {
-            from: safeString(undefined, MAX_ID_LENGTH),
-            summary: safeString(undefined, MAX_SUMMARY_LENGTH),
-          };
-        return {
-          from: safeString(item.from, MAX_ID_LENGTH),
-          ...(item.to === undefined
-            ? {}
-            : { to: safeString(item.to, MAX_ID_LENGTH) }),
-          summary: safeString(item.summary, MAX_SUMMARY_LENGTH),
-        };
-      }),
-    },
-    { items: [] },
-  );
-}
-
-function prepareSummaryArguments(value: unknown) {
-  const input = asObject(value);
-  if (!input)
-    return {
-      id: safeString(undefined, MAX_ID_LENGTH),
-      summary: safeString(undefined, MAX_SUMMARY_LENGTH),
-    };
-  return withinArgumentBudget(
-    {
-      id: safeString(input.id, MAX_ID_LENGTH),
-      summary: safeString(input.summary, MAX_SUMMARY_LENGTH),
-    },
-    {
-      id: safeString(undefined, MAX_ID_LENGTH),
-      summary: safeString(undefined, MAX_SUMMARY_LENGTH),
-    },
-  );
+/** Pi echoes invalid arguments, so discard only whole provider payloads above the byte budget. */
+function prepareArguments<T>(value: unknown): T {
+  const json = JSON.stringify(value);
+  return (json !== undefined && Buffer.byteLength(json, "utf8") > MAX_PREPARED_ARGUMENT_BYTES
+    ? 0
+    : value) as T;
 }
 const fmtTokens = (tokens: number) =>
   tokens < 1000 ? String(tokens) : `${(tokens / 1000).toFixed(1).replace(/\.0$/, "")}k`;
@@ -213,8 +120,8 @@ export default function infiniteContext(pi: ExtensionAPI) {
   let loaded = false;
   let lastNudgedBand = 0;
 
-  const branch = (ctx: ExtensionContext) =>
-    ctx.sessionManager.getBranch() as unknown as BranchEntry[];
+  const branch = (ctx: ExtensionContext): SessionEntry[] =>
+    ctx.sessionManager.getBranch();
 
   const load = (ctx: ExtensionContext) => {
     stateError = undefined;
@@ -226,11 +133,12 @@ export default function infiniteContext(pi: ExtensionAPI) {
           "This session already contains native compaction and is incompatible with infinite-context v2; start a new session.",
         );
       const originals = branchOriginals(entries);
-      const saved = entries.filter(
-        (entry) => entry.type === "custom" && entry.customType === INFINITE_CONTEXT_ENTRY,
-      );
-      roots = saved.length
-        ? parseSnapshot(saved.at(-1)!.data).roots
+      let saved: Extract<SessionEntry, { type: "custom" }> | undefined;
+      for (const entry of entries)
+        if (entry.type === "custom" && entry.customType === INFINITE_CONTEXT_ENTRY)
+          saved = entry;
+      roots = saved
+        ? parseSnapshot(saved.data).roots
         : originals.map(({ id }) => messageItem(id));
       roots = syncOriginals(roots, originals.map(({ id }) => id));
       validateToolUnitOwnership(roots, originals);
@@ -273,11 +181,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
     if (stateError) return;
     const state = current(ctx);
     return {
-      messages: buildOverlay(
-        event.messages as AgentMessageLike[],
-        state.originals,
-        state.roots,
-      ) as unknown as typeof event.messages,
+      messages: buildOverlay(event.messages, state.originals, state.roots),
     };
   });
 
@@ -325,7 +229,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
       ...PageParams,
     }),
     executionMode: "sequential",
-    prepareArguments: prepareMapArguments,
+    prepareArguments,
     async execute(_callId, params, _signal, _update, ctx) {
       const state = current(ctx);
       const page = parsePage(params.offset, params.limit);
@@ -354,7 +258,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
       ...PageParams,
     }),
     executionMode: "sequential",
-    prepareArguments: preparePeekArguments,
+    prepareArguments,
     async execute(_callId, params, _signal, _update, ctx) {
       const state = current(ctx);
       const id = bareId(params.id);
@@ -386,7 +290,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
       }),
     }),
     executionMode: "sequential",
-    prepareArguments: prepareSearchArguments,
+    prepareArguments,
     async execute(_callId, params, _signal, _update, ctx) {
       const state = current(ctx);
       const groups = params.patterns.map((source) => {
@@ -443,7 +347,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
       ),
     }),
     executionMode: "sequential",
-    prepareArguments: prepareFoldArguments,
+    prepareArguments,
     async execute(_callId, params, _signal, _update, ctx) {
       const state = current(ctx);
       const requests = params.items.map((item) => ({
@@ -484,7 +388,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
       summary: SummaryParam("Exact replacement summary; empty clears it."),
     }),
     executionMode: "sequential",
-    prepareArguments: prepareSummaryArguments,
+    prepareArguments,
     async execute(_callId, params, _signal, _update, ctx) {
       const state = current(ctx);
       const id = bareId(params.id);
