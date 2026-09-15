@@ -1,13 +1,21 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import {
+  type Tool as AiTool,
+  type ToolCall,
+  validateToolArguments,
+} from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import infiniteContext from "./index.ts";
 import type { AgentMessageLike, BranchEntry } from "./messages.ts";
 
 type Handler = (event: Record<string, unknown>, ctx: ExtensionContext) => Promise<unknown>;
-type Tool = {
+type RegisteredTool = {
   name: string;
+  description: string;
+  parameters: object;
   executionMode?: string;
+  prepareArguments?: (arguments_: unknown) => unknown;
   execute: (
     id: string,
     params: Record<string, unknown>,
@@ -20,7 +28,7 @@ type Tool = {
 function harness(initial: BranchEntry[]) {
   let entries = [...initial];
   const handlers = new Map<string, Handler[]>();
-  const tools = new Map<string, Tool>();
+  const tools = new Map<string, RegisteredTool>();
   const notifications: string[] = [];
   let appended = 0;
   const pi = {
@@ -29,7 +37,7 @@ function harness(initial: BranchEntry[]) {
       current.push(handler);
       handlers.set(name, current);
     },
-    registerTool(tool: Tool) {
+    registerTool(tool: RegisteredTool) {
       tools.set(tool.name, tool);
     },
     appendEntry(customType: string, data: unknown) {
@@ -163,26 +171,37 @@ test("folding only excluded bash reports the actual zero provider-context delta"
   assert.match(result.content[0].text, /no estimated context change/);
 });
 
-test("caller-controlled error inputs cannot bypass the global output budget", async () => {
+test("argument preparation bounds Pi schema-validation errors", () => {
   const h = harness([entry("u1", "user", "one", 1)]);
-  await h.emit("session_start");
-  const runtimeErrorText = async (promise: Promise<unknown>) => {
+  const runtimeValidationError = (name: string, arguments_: Record<string, unknown>) => {
+    const tool = h.tools.get(name)!;
+    const prepared = tool.prepareArguments?.(arguments_) ?? arguments_;
+    const call: ToolCall = {
+      type: "toolCall",
+      id: "call",
+      name,
+      arguments: prepared as Record<string, unknown>,
+    };
     try {
-      await promise;
-      assert.fail("expected tool failure");
+      validateToolArguments(tool as unknown as AiTool, call);
+      assert.fail("expected schema validation failure");
     } catch (error) {
       return `Error: ${(error as Error).message}`;
     }
   };
   const huge = "x".repeat(200_000);
-  const peekError = await runtimeErrorText(
-    h.tools.get("context_peek")!.execute("peek", { id: huge }, undefined, undefined, h.ctx),
-  );
-  const searchError = await runtimeErrorText(
-    h.tools.get("context_search")!.execute("search", { patterns: [`(${huge}`] }, undefined, undefined, h.ctx),
-  );
-  assert.ok(Buffer.byteLength(peekError, "utf8") < 1024);
-  assert.ok(Buffer.byteLength(searchError, "utf8") < 1024);
+  const errors = [
+    runtimeValidationError("context_peek", { id: huge }),
+    runtimeValidationError("context_search", { patterns: [`(${huge}`] }),
+    runtimeValidationError("context_summary", { id: "fold", summary: huge }),
+    runtimeValidationError("context_fold", {
+      items: [{ from: "u1", summary: huge }],
+    }),
+  ];
+  for (const error of errors) {
+    assert.ok(Buffer.byteLength(error, "utf8") < 1024);
+    assert.doesNotMatch(error, new RegExp("x{100}"));
+  }
 });
 
 test("reload rejects v2 snapshots that split or hide unfinished tool units", async () => {

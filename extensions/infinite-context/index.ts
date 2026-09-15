@@ -53,6 +53,86 @@ const IdParam = (description: string) =>
   Type.String({ description, minLength: 1, maxLength: MAX_ID_LENGTH });
 const SummaryParam = (description: string) =>
   Type.String({ description, maxLength: MAX_SUMMARY_LENGTH });
+
+const asObject = (value: unknown): Record<string, unknown> | undefined =>
+  value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+// Invalid sentinels deliberately retain the public static type: TypeBox rejects
+// their runtime type after Pi has discarded the original unbounded arguments.
+const safeString = (value: unknown, maximum: number): string =>
+  typeof value === "string" && value.length <= maximum
+    ? value
+    : (0 as unknown as string);
+const safeNumber = (value: unknown): number =>
+  typeof value === "number" ? value : 0;
+const preparedPage = (value: Record<string, unknown>) => ({
+  ...(value.offset === undefined ? {} : { offset: safeNumber(value.offset) }),
+  ...(value.limit === undefined ? {} : { limit: safeNumber(value.limit) }),
+});
+
+/** Pi echoes prepared arguments on schema errors, so preparation must bound them before validation. */
+function prepareMapArguments(value: unknown) {
+  const input = asObject(value);
+  if (!input) return { offset: 0 };
+  return {
+    ...(input.id === undefined ? {} : { id: safeString(input.id, MAX_ID_LENGTH) }),
+    ...preparedPage(input),
+  };
+}
+
+function preparePeekArguments(value: unknown) {
+  const input = asObject(value);
+  if (!input) return { id: safeString(undefined, MAX_ID_LENGTH) };
+  return { id: safeString(input.id, MAX_ID_LENGTH), ...preparedPage(input) };
+}
+
+function prepareSearchArguments(value: unknown) {
+  const input = asObject(value);
+  if (!input || !Array.isArray(input.patterns) || input.patterns.length > 20)
+    return { patterns: [] };
+  return {
+    patterns: input.patterns.map((pattern) =>
+      safeString(pattern, MAX_PATTERN_LENGTH),
+    ),
+  };
+}
+
+function prepareFoldArguments(value: unknown) {
+  const input = asObject(value);
+  if (!input || !Array.isArray(input.items) || input.items.length > 50)
+    return { items: [] };
+  return {
+    items: input.items.map((value) => {
+      const item = asObject(value);
+      if (!item)
+        return {
+          from: safeString(undefined, MAX_ID_LENGTH),
+          summary: safeString(undefined, MAX_SUMMARY_LENGTH),
+        };
+      return {
+        from: safeString(item.from, MAX_ID_LENGTH),
+        ...(item.to === undefined
+          ? {}
+          : { to: safeString(item.to, MAX_ID_LENGTH) }),
+        summary: safeString(item.summary, MAX_SUMMARY_LENGTH),
+      };
+    }),
+  };
+}
+
+function prepareSummaryArguments(value: unknown) {
+  const input = asObject(value);
+  if (!input)
+    return {
+      id: safeString(undefined, MAX_ID_LENGTH),
+      summary: safeString(undefined, MAX_SUMMARY_LENGTH),
+    };
+  return {
+    id: safeString(input.id, MAX_ID_LENGTH),
+    summary: safeString(input.summary, MAX_SUMMARY_LENGTH),
+  };
+}
 const fmtTokens = (tokens: number) =>
   tokens < 1000 ? String(tokens) : `${(tokens / 1000).toFixed(1).replace(/\.0$/, "")}k`;
 
@@ -222,6 +302,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
       ...PageParams,
     }),
     executionMode: "sequential",
+    prepareArguments: prepareMapArguments,
     async execute(_callId, params, _signal, _update, ctx) {
       const state = current(ctx);
       const page = parsePage(params.offset, params.limit);
@@ -250,6 +331,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
       ...PageParams,
     }),
     executionMode: "sequential",
+    prepareArguments: preparePeekArguments,
     async execute(_callId, params, _signal, _update, ctx) {
       const state = current(ctx);
       const id = bareId(params.id);
@@ -281,6 +363,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
       }),
     }),
     executionMode: "sequential",
+    prepareArguments: prepareSearchArguments,
     async execute(_callId, params, _signal, _update, ctx) {
       const state = current(ctx);
       const groups = params.patterns.map((source) => {
@@ -337,6 +420,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
       ),
     }),
     executionMode: "sequential",
+    prepareArguments: prepareFoldArguments,
     async execute(_callId, params, _signal, _update, ctx) {
       const state = current(ctx);
       const requests = params.items.map((item) => ({
@@ -377,6 +461,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
       summary: SummaryParam("Exact replacement summary; empty clears it."),
     }),
     executionMode: "sequential",
+    prepareArguments: prepareSummaryArguments,
     async execute(_callId, params, _signal, _update, ctx) {
       const state = current(ctx);
       const id = bareId(params.id);
