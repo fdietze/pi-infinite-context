@@ -24,7 +24,7 @@ test("nested folds preserve ordered, uniquely owned original leaves", () => {
   assert.deepEqual(originalIds(outer), ids(5));
   assert.equal(findItem(outer, "f1")?.kind, "fold");
   assert.deepEqual((findItem(outer, "f1") as { summary: string }).summary, "inner");
-  assert.throws(() => replaceRootSummary(outer, "f1", "hidden edit"), /visible fold/);
+  assert.throws(() => replaceRootSummary(outer, "f1", "hidden edit"), /visible root fold/);
   assert.equal((replaceRootSummary(outer, "f2", "new") as Item[])[0].kind, "fold");
 });
 

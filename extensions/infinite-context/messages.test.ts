@@ -8,6 +8,7 @@ import {
   planRootRanges,
   serializeMessage,
   unitBounds,
+  validateToolUnitOwnership,
 } from "./messages.ts";
 
 const msg = (id: string, role: string, content: AgentMessageLike["content"], extra: Partial<AgentMessageLike> = {}): OriginalMessage => ({
@@ -59,6 +60,15 @@ test("a partial parallel result batch cannot be folded through a known result", 
     () => planRootRanges(roots, originals, [{ from: "r2", summary: "" }]),
     /unfinished/,
   );
+});
+
+test("ownership validation accepts a completed unit folded as one subtree", () => {
+  const originals = completedTools();
+  const roots = wrapRootRanges(
+    originals.map(({ id }) => messageItem(id)),
+    [{ first: 1, last: 3, id: "f", summary: "done" }],
+  );
+  assert.doesNotThrow(() => validateToolUnitOwnership(roots, originals));
 });
 
 test("nested fold children remain identity-preserving roots for later folding", () => {

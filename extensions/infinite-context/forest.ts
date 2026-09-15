@@ -66,7 +66,7 @@ export function wrapRootRanges(
       range.last >= roots.length
     )
       throw new Error("Fold range is outside the visible roots");
-    if (!range.id || ids.has(range.id)) throw new Error(`Duplicate node id: ${range.id}`);
+    if (!range.id || ids.has(range.id)) throw new Error("Fold node id is not unique");
     ids.add(range.id);
     for (let i = range.first; i <= range.last; ++i) {
       if (occupied.has(i)) throw new Error("Fold ranges overlap after tool-unit expansion");
@@ -97,7 +97,7 @@ export function wrapRootRanges(
 export function replaceRootSummary(roots: Forest, id: string, summary: string): Forest {
   const index = roots.findIndex((item) => item.id === id);
   const item = roots[index];
-  if (!item || item.kind !== "fold") throw new Error(`Expected visible fold: ${id}`);
+  if (!item || item.kind !== "fold") throw new Error("Expected a visible root fold");
   return roots.map((candidate, i) =>
     i === index ? { ...item, summary } : candidate,
   );
@@ -146,15 +146,15 @@ export function parseSnapshot(value: unknown): Snapshot {
     if (!source || typeof source !== "object") throw new Error("Snapshot item is not an object");
     const item = source as Record<string, unknown>;
     if (typeof item.id !== "string" || !item.id) throw new Error("Snapshot item has no id");
-    if (ids.has(item.id)) throw new Error(`Snapshot has duplicate node id: ${item.id}`);
+    if (ids.has(item.id)) throw new Error("Snapshot has a duplicate node id");
     ids.add(item.id);
     if (item.kind === "message") {
       target.push({ kind: "message", id: item.id });
       continue;
     }
     if (item.kind !== "fold" || typeof item.summary !== "string" || !Array.isArray(item.children))
-      throw new Error(`Invalid snapshot item: ${item.id}`);
-    if (!item.children.length) throw new Error(`Fold has no children: ${item.id}`);
+      throw new Error("Snapshot contains an invalid item");
+    if (!item.children.length) throw new Error("Snapshot contains an empty fold");
     const fold: MutableFold = { kind: "fold", id: item.id, summary: item.summary, children: [] };
     target.push(fold);
     for (let i = item.children.length - 1; i >= 0; --i)

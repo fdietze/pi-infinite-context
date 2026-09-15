@@ -27,6 +27,7 @@ import {
   estimateContextTokens,
   planRootRanges,
   serializeMessage,
+  validateToolUnitOwnership,
 } from "./messages.ts";
 import { planNudge } from "./nudge.ts";
 import {
@@ -44,7 +45,14 @@ import {
   searchArchive,
 } from "./search.ts";
 
+const MAX_ID_LENGTH = 128;
+const MAX_PATTERN_LENGTH = 4096;
+const MAX_SUMMARY_LENGTH = 12_000;
 const bareId = (id: string) => id.replace(/^#/, "");
+const IdParam = (description: string) =>
+  Type.String({ description, minLength: 1, maxLength: MAX_ID_LENGTH });
+const SummaryParam = (description: string) =>
+  Type.String({ description, maxLength: MAX_SUMMARY_LENGTH });
 const fmtTokens = (tokens: number) =>
   tokens < 1000 ? String(tokens) : `${(tokens / 1000).toFixed(1).replace(/\.0$/, "")}k`;
 
@@ -60,8 +68,8 @@ const PageParams = {
 function directItems(roots: Forest, id?: string): { label: string; items: Forest } {
   if (!id) return { label: "roots", items: roots };
   const item = findItem(roots, id);
-  if (!item) throw new Error(`Unknown node id: ${id}`);
-  if (item.kind !== "fold") throw new Error(`Message ${id} has no children`);
+  if (!item) throw new Error("Unknown node id");
+  if (item.kind !== "fold") throw new Error("A message node has no children");
   return { label: `children of ${id}`, items: item.children };
 }
 
@@ -117,6 +125,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
         ? parseSnapshot(saved.at(-1)!.data).roots
         : originals.map(({ id }) => messageItem(id));
       roots = syncOriginals(roots, originals.map(({ id }) => id));
+      validateToolUnitOwnership(roots, originals);
     } catch (error) {
       stateError = error as Error;
       roots = [];
@@ -136,6 +145,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
       );
     const originals = branchOriginals(entries);
     const derivedRoots = syncOriginals(roots, originals.map(({ id }) => id));
+    validateToolUnitOwnership(derivedRoots, originals);
     return {
       roots: derivedRoots,
       originals,
@@ -203,7 +213,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
     description:
       "List ordered visible roots, or the direct children of one fold. Output is paginated and previews are bounded; it never recursively dumps a subtree.",
     parameters: Type.Object({
-      id: Type.Optional(Type.String({ description: "Fold id whose direct children to list. Omit for visible roots." })),
+      id: Type.Optional(IdParam("Fold id whose direct children to list. Omit for visible roots.")),
       ...PageParams,
     }),
     executionMode: "sequential",
@@ -231,7 +241,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
       `Read one original message's serialized text or exactly one fold's summary without changing context. ` +
       `Uses 1-based line windows (default ${DEFAULT_PAGE_LIMIT}); every result reports total item lines. Output is capped at ${MAX_OUTPUT_BYTES} UTF-8 bytes, so a giant line may be clipped.`,
     parameters: Type.Object({
-      id: Type.String({ description: "Stable message or fold id from context_map or context_search." }),
+      id: IdParam("Stable message or fold id from context_map or context_search."),
       ...PageParams,
     }),
     executionMode: "sequential",
@@ -239,7 +249,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
       const state = current(ctx);
       const id = bareId(params.id);
       const item = findItem(state.roots, id);
-      if (!item) throw new Error(`Unknown node id: ${id}`);
+      if (!item) throw new Error("Unknown node id");
       const page = parsePage(params.offset, params.limit);
       const text = item.kind === "fold" ? item.summary : serializeMessage(state.byId.get(item.id)!.message);
       const window = lineWindow(text, page.offset, page.limit, MAX_OUTPUT_BYTES - 500);
@@ -260,7 +270,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
       `Case-insensitive JavaScript regex search over every current-branch original and every reachable fold summary, once each. ` +
       `Returns stable ids and 1-based lines. Each pattern emits at most ${SEARCH_MATCHES_PER_ITEM} lines per item and ${SEARCH_MATCHES_PER_PATTERN} lines overall.`,
     parameters: Type.Object({
-      patterns: Type.Array(Type.String({ description: "JavaScript regular expression; empty patterns are rejected." }), {
+      patterns: Type.Array(Type.String({ description: "JavaScript regular expression; empty patterns are rejected.", minLength: 1, maxLength: MAX_PATTERN_LENGTH }), {
         minItems: 1,
         maxItems: 20,
       }),
@@ -272,8 +282,8 @@ export default function infiniteContext(pi: ExtensionAPI) {
         let pattern: RegExp;
         try {
           pattern = compilePattern(source);
-        } catch (error) {
-          throw new Error(`Invalid pattern /${source}/: ${(error as Error).message}`);
+        } catch {
+          throw new Error("Invalid search pattern: malformed JavaScript regular expression");
         }
         return { source, result: searchArchive(state.originals, state.roots, pattern) };
       });
@@ -314,9 +324,9 @@ export default function infiniteContext(pi: ExtensionAPI) {
     parameters: Type.Object({
       items: Type.Array(
         Type.Object({
-          from: Type.String({ description: "First visible root id." }),
-          to: Type.Optional(Type.String({ description: "Inclusive visible root id; defaults to from." })),
-          summary: Type.String({ description: "Exact new fold summary; an empty string is allowed." }),
+          from: IdParam("First visible root id."),
+          to: Type.Optional(IdParam("Inclusive visible root id; defaults to from.")),
+          summary: SummaryParam("Exact new fold summary; an empty string is allowed."),
         }),
         { minItems: 1, maxItems: 50, description: "Disjoint root ranges; the mutation is atomic." },
       ),
@@ -358,8 +368,8 @@ export default function infiniteContext(pi: ExtensionAPI) {
     description:
       "Replace the summary of one currently visible root fold. Hidden fold summaries are immutable; an empty string clears the summary.",
     parameters: Type.Object({
-      id: Type.String({ description: "Visible root fold id." }),
-      summary: Type.String({ description: "Exact replacement summary; empty clears it." }),
+      id: IdParam("Visible root fold id."),
+      summary: SummaryParam("Exact replacement summary; empty clears it."),
     }),
     executionMode: "sequential",
     async execute(_callId, params, _signal, _update, ctx) {

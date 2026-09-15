@@ -163,6 +163,83 @@ test("folding only excluded bash reports the actual zero provider-context delta"
   assert.match(result.content[0].text, /no estimated context change/);
 });
 
+test("caller-controlled error inputs cannot bypass the global output budget", async () => {
+  const h = harness([entry("u1", "user", "one", 1)]);
+  await h.emit("session_start");
+  const runtimeErrorText = async (promise: Promise<unknown>) => {
+    try {
+      await promise;
+      assert.fail("expected tool failure");
+    } catch (error) {
+      return `Error: ${(error as Error).message}`;
+    }
+  };
+  const huge = "x".repeat(200_000);
+  const peekError = await runtimeErrorText(
+    h.tools.get("context_peek")!.execute("peek", { id: huge }, undefined, undefined, h.ctx),
+  );
+  const searchError = await runtimeErrorText(
+    h.tools.get("context_search")!.execute("search", { patterns: [`(${huge}`] }, undefined, undefined, h.ctx),
+  );
+  assert.ok(Buffer.byteLength(peekError, "utf8") < 1024);
+  assert.ok(Buffer.byteLength(searchError, "utf8") < 1024);
+});
+
+test("reload rejects v2 snapshots that split or hide unfinished tool units", async () => {
+  const assistant = entry(
+    "a1",
+    "assistant",
+    [{ type: "toolCall", id: "call", name: "read", arguments: {} }],
+    1,
+  );
+  const result: BranchEntry = {
+    type: "message",
+    id: "r1",
+    message: {
+      role: "toolResult",
+      toolCallId: "call",
+      toolName: "read",
+      content: [{ type: "text", text: "done" }],
+      timestamp: 2,
+    },
+  };
+  const split = harness([
+    assistant,
+    result,
+    {
+      type: "custom",
+      id: "state",
+      customType: "infinite-context",
+      data: {
+        version: 2,
+        roots: [
+          { kind: "fold", id: "fold-a", summary: "call", children: [{ kind: "message", id: "a1" }] },
+          { kind: "message", id: "r1" },
+        ],
+      },
+    },
+  ]);
+  await split.emit("session_start");
+  assert.match(split.notifications[0], /splits an assistant tool call/);
+
+  const unfinished = harness([
+    assistant,
+    {
+      type: "custom",
+      id: "state",
+      customType: "infinite-context",
+      data: {
+        version: 2,
+        roots: [
+          { kind: "fold", id: "fold-a", summary: "pending", children: [{ kind: "message", id: "a1" }] },
+        ],
+      },
+    },
+  ]);
+  await unfinished.emit("session_start");
+  assert.match(unfinished.notifications[0], /unfinished tool-call unit/);
+});
+
 test("old snapshots and pre-compacted sessions are rejected rather than interpreted", async () => {
   const old = harness([
     entry("u1", "user", "one", 1),

@@ -186,6 +186,40 @@ export function unitBounds(messages: readonly OriginalMessage[]): UnitBounds {
   return { start, end, unfinished };
 }
 
+/** Reject persisted states that could project an orphan call or result. */
+export function validateToolUnitOwnership(
+  roots: Forest,
+  originals: readonly OriginalMessage[],
+): void {
+  const rootByOriginal = new Map<string, { index: number; kind: Item["kind"] }>();
+  for (let index = 0; index < roots.length; ++index)
+    for (const id of originalIds([roots[index]]))
+      rootByOriginal.set(id, { index, kind: roots[index].kind });
+  const bounds = unitBounds(originals);
+  for (let owner = 0; owner < originals.length; ++owner) {
+    if (bounds.start[owner] !== owner || bounds.end[owner] === owner) {
+      if (!bounds.unfinished.has(owner)) continue;
+    }
+    const members = originals.slice(owner, bounds.end[owner] + 1);
+    const locations = members.map(({ id }) => rootByOriginal.get(id)!);
+    if (bounds.unfinished.has(owner)) {
+      if (locations.some((location) => location.kind === "fold"))
+        throw new Error(
+          "Snapshot folds an unfinished tool-call unit; start a new session",
+        );
+      continue;
+    }
+    const allLive = locations.every((location) => location.kind === "message");
+    const oneFold =
+      locations.every((location) => location.kind === "fold") &&
+      locations.every((location) => location.index === locations[0].index);
+    if (!allLive && !oneFold)
+      throw new Error(
+        "Snapshot splits an assistant tool call from its results; start a new session",
+      );
+  }
+}
+
 export interface RootRangeRequest {
   readonly from: string;
   readonly to?: string;
@@ -209,8 +243,8 @@ export function planRootRanges(
   return requests.map((request) => {
     const a = rootIndex.get(request.from);
     const b = rootIndex.get(request.to ?? request.from);
-    if (a === undefined) throw new Error(`Not a visible root: ${request.from}`);
-    if (b === undefined) throw new Error(`Not a visible root: ${request.to}`);
+    if (a === undefined || b === undefined)
+      throw new Error("A fold endpoint is not a visible root");
     let first = Math.min(a, b);
     let last = Math.max(a, b);
     let changed = true;
@@ -223,7 +257,7 @@ export function planRootRanges(
         const index = originalIndex.get(id)!;
         const owner = bounds.start[index];
         if (bounds.unfinished.has(owner))
-          throw new Error(`Cannot fold unfinished tool-call unit containing ${id}`);
+          throw new Error("Cannot fold an unfinished tool-call unit");
         const unitFirst = rootOfOriginal.get(originals[bounds.start[index]].id)!;
         const unitLast = rootOfOriginal.get(originals[bounds.end[index]].id)!;
         if (unitFirst < first) {
