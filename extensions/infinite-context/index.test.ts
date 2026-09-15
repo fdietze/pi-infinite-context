@@ -227,6 +227,14 @@ test("generic argument budget bounds the real Pi validation-error path", () => {
     id: "fold",
     summary: "x".repeat(12_000),
   });
+  const maximalFold = {
+    items: [{
+      from: "f".repeat(128),
+      to: "t".repeat(128),
+      summary: "s".repeat(12_000),
+    }],
+  };
+  assert.deepEqual(validate("context_fold", maximalFold), maximalFold);
 
   const huge = "😀\n\\\"".repeat(50_000);
   const errors = [
@@ -235,7 +243,7 @@ test("generic argument budget bounds the real Pi validation-error path", () => {
     validationError("context_search", { patterns: {} }),
     validationError("context_fold", { items: Array.from({ length: 1000 }, () => ({})) }),
     // This stays just below the guard and maximizes per-element TypeBox paths.
-    validationError("context_search", { patterns: Array.from({ length: 6130 }, () => 0) }),
+    validationError("context_search", { patterns: Array.from({ length: 6649 }, () => 0) }),
     validationError("context_summary", { summary: "x".repeat(12_000) }),
     validationError("context_summary", { summary: "😀\n\\\"".repeat(1000) }),
     validationError("context_peek", { id: huge }),

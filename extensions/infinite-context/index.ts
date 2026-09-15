@@ -48,8 +48,8 @@ const MAX_ID_LENGTH = 128;
 const MAX_PATTERN_LENGTH = 4096;
 const MAX_SUMMARY_LENGTH = 12_000;
 // Leave headroom for TypeBox's per-item error paths and pretty-printed argument echo
-// while still admitting the schema's 12,000-character ASCII summary.
-const MAX_PREPARED_ARGUMENT_BYTES = 12 * 1024;
+// while still admitting one fold with every string at its schema maximum.
+const MAX_PREPARED_ARGUMENT_BYTES = 13 * 1024;
 const bareId = (id: string) => id.replace(/^#/, "");
 const IdParam = (description: string) =>
   Type.String({ description, minLength: 1, maxLength: MAX_ID_LENGTH });
