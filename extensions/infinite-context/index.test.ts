@@ -197,6 +197,15 @@ test("argument preparation bounds Pi schema-validation errors", () => {
     runtimeValidationError("context_fold", {
       items: [{ from: "u1", summary: huge }],
     }),
+    runtimeValidationError("context_search", {
+      patterns: Array.from({ length: 20 }, () => "y".repeat(1000)),
+    }),
+    runtimeValidationError("context_fold", {
+      items: Array.from({ length: 50 }, () => ({
+        from: "u1",
+        summary: "y".repeat(1000),
+      })),
+    }),
   ];
   for (const error of errors) {
     assert.ok(Buffer.byteLength(error, "utf8") < 1024);

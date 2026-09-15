@@ -48,6 +48,7 @@ import {
 const MAX_ID_LENGTH = 128;
 const MAX_PATTERN_LENGTH = 4096;
 const MAX_SUMMARY_LENGTH = 12_000;
+const MAX_PREPARED_ARGUMENT_BYTES = 16 * 1024;
 const bareId = (id: string) => id.replace(/^#/, "");
 const IdParam = (description: string) =>
   Type.String({ description, minLength: 1, maxLength: MAX_ID_LENGTH });
@@ -70,55 +71,71 @@ const preparedPage = (value: Record<string, unknown>) => ({
   ...(value.offset === undefined ? {} : { offset: safeNumber(value.offset) }),
   ...(value.limit === undefined ? {} : { limit: safeNumber(value.limit) }),
 });
+const withinArgumentBudget = <T>(value: T, invalid: T): T =>
+  Buffer.byteLength(JSON.stringify(value), "utf8") <= MAX_PREPARED_ARGUMENT_BYTES
+    ? value
+    : invalid;
 
 /** Pi echoes prepared arguments on schema errors, so preparation must bound them before validation. */
 function prepareMapArguments(value: unknown) {
   const input = asObject(value);
   if (!input) return { offset: 0 };
-  return {
-    ...(input.id === undefined ? {} : { id: safeString(input.id, MAX_ID_LENGTH) }),
-    ...preparedPage(input),
-  };
+  return withinArgumentBudget(
+    {
+      ...(input.id === undefined ? {} : { id: safeString(input.id, MAX_ID_LENGTH) }),
+      ...preparedPage(input),
+    },
+    { offset: 0 },
+  );
 }
 
 function preparePeekArguments(value: unknown) {
   const input = asObject(value);
   if (!input) return { id: safeString(undefined, MAX_ID_LENGTH) };
-  return { id: safeString(input.id, MAX_ID_LENGTH), ...preparedPage(input) };
+  return withinArgumentBudget(
+    { id: safeString(input.id, MAX_ID_LENGTH), ...preparedPage(input) },
+    { id: safeString(undefined, MAX_ID_LENGTH) },
+  );
 }
 
 function prepareSearchArguments(value: unknown) {
   const input = asObject(value);
   if (!input || !Array.isArray(input.patterns) || input.patterns.length > 20)
     return { patterns: [] };
-  return {
-    patterns: input.patterns.map((pattern) =>
-      safeString(pattern, MAX_PATTERN_LENGTH),
-    ),
-  };
+  return withinArgumentBudget(
+    {
+      patterns: input.patterns.map((pattern) =>
+        safeString(pattern, MAX_PATTERN_LENGTH),
+      ),
+    },
+    { patterns: [] },
+  );
 }
 
 function prepareFoldArguments(value: unknown) {
   const input = asObject(value);
   if (!input || !Array.isArray(input.items) || input.items.length > 50)
     return { items: [] };
-  return {
-    items: input.items.map((value) => {
-      const item = asObject(value);
-      if (!item)
+  return withinArgumentBudget(
+    {
+      items: input.items.map((value) => {
+        const item = asObject(value);
+        if (!item)
+          return {
+            from: safeString(undefined, MAX_ID_LENGTH),
+            summary: safeString(undefined, MAX_SUMMARY_LENGTH),
+          };
         return {
-          from: safeString(undefined, MAX_ID_LENGTH),
-          summary: safeString(undefined, MAX_SUMMARY_LENGTH),
+          from: safeString(item.from, MAX_ID_LENGTH),
+          ...(item.to === undefined
+            ? {}
+            : { to: safeString(item.to, MAX_ID_LENGTH) }),
+          summary: safeString(item.summary, MAX_SUMMARY_LENGTH),
         };
-      return {
-        from: safeString(item.from, MAX_ID_LENGTH),
-        ...(item.to === undefined
-          ? {}
-          : { to: safeString(item.to, MAX_ID_LENGTH) }),
-        summary: safeString(item.summary, MAX_SUMMARY_LENGTH),
-      };
-    }),
-  };
+      }),
+    },
+    { items: [] },
+  );
 }
 
 function prepareSummaryArguments(value: unknown) {
@@ -128,10 +145,16 @@ function prepareSummaryArguments(value: unknown) {
       id: safeString(undefined, MAX_ID_LENGTH),
       summary: safeString(undefined, MAX_SUMMARY_LENGTH),
     };
-  return {
-    id: safeString(input.id, MAX_ID_LENGTH),
-    summary: safeString(input.summary, MAX_SUMMARY_LENGTH),
-  };
+  return withinArgumentBudget(
+    {
+      id: safeString(input.id, MAX_ID_LENGTH),
+      summary: safeString(input.summary, MAX_SUMMARY_LENGTH),
+    },
+    {
+      id: safeString(undefined, MAX_ID_LENGTH),
+      summary: safeString(undefined, MAX_SUMMARY_LENGTH),
+    },
+  );
 }
 const fmtTokens = (tokens: number) =>
   tokens < 1000 ? String(tokens) : `${(tokens / 1000).toFixed(1).replace(/\.0$/, "")}k`;
