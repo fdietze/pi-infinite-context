@@ -29,8 +29,10 @@ export function compilePattern(source: string): RegExp {
 }
 
 function previewLine(line: string, matchIndex: number): string {
-  const start = Math.max(0, matchIndex - 60);
-  const end = Math.min(line.length, start + SEARCH_LINE_CHARS);
+  let start = Math.max(0, matchIndex - 60);
+  let end = Math.min(line.length, start + SEARCH_LINE_CHARS);
+  if (start > 0 && /[\uDC00-\uDFFF]/.test(line[start])) --start;
+  if (end < line.length && /[\uD800-\uDBFF]/.test(line[end - 1])) --end;
   return `${start ? "…" : ""}${line.slice(start, end).replace(/\s+/g, " ").trim()}${end < line.length ? "…" : ""}`;
 }
 

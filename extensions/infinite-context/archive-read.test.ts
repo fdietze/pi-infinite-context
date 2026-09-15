@@ -28,6 +28,14 @@ test("search scans each original and reachable fold summary with lookup-compatib
   assert.equal(lineWindow("needle summary\nsecond summary line", 1, 1).text, "needle summary");
 });
 
+test("search previews do not split Unicode surrogate pairs", () => {
+  const unicode: OriginalMessage[] = [
+    { id: "emoji", message: { role: "user", content: `${"😀".repeat(100)}needle${"😀".repeat(100)}`, timestamp: 1 } },
+  ];
+  const result = searchArchive(unicode, [messageItem("emoji")], compilePattern("needle"));
+  assert.doesNotMatch(result.hits[0].matches[0].text, /�/);
+});
+
 test("empty and invalid regex patterns fail at the boundary", () => {
   assert.throws(() => compilePattern(""), /empty/);
   assert.throws(() => compilePattern("("), SyntaxError);

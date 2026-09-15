@@ -73,15 +73,20 @@ function directItems(roots: Forest, id?: string): { label: string; items: Forest
   return { label: `children of ${id}`, items: item.children };
 }
 
+function previewText(text: string): string {
+  const characters = [...text.replace(/\s+/g, " ").trim()];
+  return characters.length > 100
+    ? `${characters.slice(0, 100).join("")}…`
+    : characters.join("");
+}
+
 function itemPreview(item: Item, byId: ReadonlyMap<string, OriginalMessage>): string {
   if (item.kind === "fold") {
-    const summary = item.summary.replace(/\s+/g, " ").trim();
-    const preview = summary.length > 100 ? `${summary.slice(0, 100)}…` : summary || "(empty summary)";
+    const preview = previewText(item.summary) || "(empty summary)";
     return `[#${item.id}] fold · ${item.children.length} direct children · ${originalIds([item]).length} messages · ${preview}`;
   }
   const original = byId.get(item.id)!;
-  const text = serializeMessage(original.message).replace(/\s+/g, " ").trim();
-  const preview = text.length > 100 ? `${text.slice(0, 100)}…` : text || "(empty text projection)";
+  const preview = previewText(serializeMessage(original.message)) || "(empty text projection)";
   return `[#${item.id}] ${original.message.role} · ~${fmtTokens(estimateContextTokens(original.message))} tokens · ${preview}`;
 }
 
