@@ -198,7 +198,7 @@ test("generic argument budget bounds the real Pi validation-error path", () => {
       type: "toolCall",
       id: "call",
       name,
-      arguments: prepared as Record<string, unknown>,
+      arguments: prepared as ToolCall["arguments"],
     };
     return validateToolArguments(tool as unknown as AiTool, call);
   };
