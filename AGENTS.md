@@ -5,10 +5,10 @@
 - `DESIGN.md`: authoritative fold-tree invariants and public tool semantics.
 - `extensions/infinite-context/index.ts`: Pi integration and tool registration.
 - `extensions/infinite-context/forest.ts`: pure recursive archive state and transforms.
-- `extensions/infinite-context/originals.ts`: branch entries converted to addressable originals.
+- `extensions/infinite-context/originals.ts`: branch entries joined with their live message from Pi's session projection.
 - `extensions/infinite-context/serialize-message.ts`: authoritative text projection of one message.
-- `extensions/infinite-context/estimate-context-tokens.ts`: per-message live-context token estimate.
-- `extensions/infinite-context/tool-units.ts`: tool-call unit bounds and snapshot ownership validation.
+- `extensions/infinite-context/fold-projection.ts`: anchors, fold summary text and live token cost.
+- `extensions/infinite-context/tool-units.ts`: live tool-call units, the pending unit, and snapshot ownership validation.
 - `extensions/infinite-context/plan-root-ranges.ts`: fold request resolution and tool-unit range expansion.
 - `extensions/infinite-context/overlay.ts`: request-copy context overlay.
 - `extensions/infinite-context/search.ts`: pure archive regex search.

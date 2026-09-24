@@ -2,54 +2,69 @@ import type { Forest, Item } from "./forest.ts";
 import { originalIds } from "./forest.ts";
 import type { OriginalMessage } from "./originals.ts";
 
-export interface UnitBounds {
+export interface ToolUnits {
+  /** Index of the first original of the tool unit owning each original. */
   readonly start: number[];
+  /** Index of the last original of that unit. */
   readonly end: number[];
-  readonly unfinished: ReadonlySet<number>;
+  /**
+   * The currently executing turn: the last live assistant of the branch, when
+   * some of its calls still lack a live result. Everything before it is
+   * settled, so it is the only range the archive must refuse to fold.
+   */
+  readonly pendingOwner: number | undefined;
 }
 
-/** Completed assistant call batches and all correlated results are indivisible. */
-export function unitBounds(messages: readonly OriginalMessage[]): UnitBounds {
-  const start = messages.map((_, i) => i);
-  const end = messages.map((_, i) => i);
-  const ownerByCall = new Map<string, number>();
-  const callsByOwner = new Map<number, string[]>();
-  for (let i = 0; i < messages.length; ++i) {
-    const message = messages[i].message;
-    if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
-    for (const block of message.content) {
-      if (block.type === "toolCall" && typeof block.id === "string") {
-        ownerByCall.set(block.id, i);
-        const calls = callsByOwner.get(i) ?? [];
-        calls.push(block.id);
-        callsByOwner.set(i, calls);
-      }
-    }
-  }
+const toolCallIds = (message: OriginalMessage["live"]): string[] => {
+  if (!message || message.role !== "assistant" || !Array.isArray(message.content)) return [];
+  const ids: string[] = [];
+  for (const block of message.content)
+    if (block.type === "toolCall" && typeof block.id === "string") ids.push(block.id);
+  return ids;
+};
+
+/**
+ * Group live assistant tool calls with their live results.
+ *
+ * Only live messages can form a unit: an attempt Pi omitted via `context_edit`
+ * never reaches the provider, so it cannot orphan anything. An abandoned call
+ * without a result is a complete one-message unit — the provider boundary
+ * synthesizes the missing result.
+ */
+export function toolUnits(originals: readonly OriginalMessage[]): ToolUnits {
+  const start = originals.map((_, i) => i);
+  const end = originals.map((_, i) => i);
   const resultIndex = new Map<string, number>();
-  for (let i = 0; i < messages.length; ++i) {
-    const message = messages[i].message;
-    if (message.role === "toolResult" && message.toolCallId)
-      resultIndex.set(message.toolCallId, i);
+  for (let i = 0; i < originals.length; ++i) {
+    const live = originals[i].live;
+    if (live?.role === "toolResult" && live.toolCallId) resultIndex.set(live.toolCallId, i);
   }
-  const unfinished = new Set<number>();
-  for (const [owner, calls] of callsByOwner) {
-    const presentResults = calls
+  let lastLiveAssistant: number | undefined;
+  let pendingOwner: number | undefined;
+  for (let owner = 0; owner < originals.length; ++owner) {
+    const live = originals[owner].live;
+    if (!live) continue;
+    if (live.role !== "assistant") continue;
+    lastLiveAssistant = owner;
+    const calls = toolCallIds(live);
+    if (calls.length === 0) continue;
+    const results = calls
       .map((id) => resultIndex.get(id))
       .filter((index): index is number => index !== undefined);
-    const last = Math.max(owner, ...presentResults);
-    // Even a partial result batch is one unfinished unit. Mark its known range
-    // so selecting a result cannot evade the unfinished-owner rejection.
+    const last = Math.max(owner, ...results);
     for (let i = owner; i <= last; ++i) {
       start[i] = owner;
       end[i] = last;
     }
-    if (presentResults.length !== calls.length) unfinished.add(owner);
+    if (results.length !== calls.length) pendingOwner = owner;
   }
-  return { start, end, unfinished };
+  // Only the final assistant can still be running; an earlier incomplete unit
+  // was abandoned and stays foldable forever.
+  if (pendingOwner !== lastLiveAssistant) pendingOwner = undefined;
+  return { start, end, pendingOwner };
 }
 
-/** Reject persisted states that could project an orphan call or result. */
+/** Reject persisted states that would project a tool call without its results. */
 export function validateToolUnitOwnership(
   roots: Forest,
   originals: readonly OriginalMessage[],
@@ -58,25 +73,17 @@ export function validateToolUnitOwnership(
   for (let index = 0; index < roots.length; ++index)
     for (const id of originalIds([roots[index]]))
       rootByOriginal.set(id, { index, kind: roots[index].kind });
-  const bounds = unitBounds(originals);
+  const units = toolUnits(originals);
   for (let owner = 0; owner < originals.length; ++owner) {
-    if (bounds.start[owner] !== owner || bounds.end[owner] === owner) {
-      if (!bounds.unfinished.has(owner)) continue;
-    }
-    const members = originals.slice(owner, bounds.end[owner] + 1);
-    const locations = members.map(({ id }) => rootByOriginal.get(id)!);
-    if (bounds.unfinished.has(owner)) {
-      if (locations.some((location) => location.kind === "fold"))
-        throw new Error(
-          "Snapshot folds an unfinished tool-call unit; start a new session",
-        );
-      continue;
-    }
-    const allLive = locations.every((location) => location.kind === "message");
-    const oneFold =
-      locations.every((location) => location.kind === "fold") &&
-      locations.every((location) => location.index === locations[0].index);
-    if (!allLive && !oneFold)
+    if (units.start[owner] !== owner || units.end[owner] === owner) continue;
+    const locations = originals
+      .slice(owner, units.end[owner] + 1)
+      .map(({ id }) => rootByOriginal.get(id)!);
+    const allRoots = locations.every((location) => location.kind === "message");
+    const oneFold = locations.every(
+      (location) => location.kind === "fold" && location.index === locations[0].index,
+    );
+    if (!allRoots && !oneFold)
       throw new Error(
         "Snapshot splits an assistant tool call from its results; start a new session",
       );

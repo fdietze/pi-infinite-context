@@ -19,9 +19,14 @@ import {
   syncOriginals,
   wrapRootRanges,
 } from "./forest.ts";
-import { estimateContextTokens } from "./estimate-context-tokens.ts";
-import { type OriginalMessage, branchOriginals } from "./originals.ts";
-import { buildOverlay } from "./overlay.ts";
+import {
+  type OriginalsById,
+  anchorId,
+  liveTokens,
+  visibleTokens,
+} from "./fold-projection.ts";
+import { branchOriginals, projectedPositions } from "./originals.ts";
+import { ProjectionMismatchError, buildOverlay } from "./overlay.ts";
 import { planRootRanges } from "./plan-root-ranges.ts";
 import { serializeMessage } from "./serialize-message.ts";
 import { validateToolUnitOwnership } from "./tool-units.ts";
@@ -43,22 +48,12 @@ import {
 const MAX_ID_LENGTH = 128;
 const MAX_PATTERN_LENGTH = 4096;
 const MAX_SUMMARY_LENGTH = 12_000;
-// Leave headroom for TypeBox's per-item error paths and pretty-printed argument echo
-// while still admitting one fold with every string at its schema maximum.
-const MAX_PREPARED_ARGUMENT_BYTES = 13 * 1024;
 const bareId = (id: string) => id.replace(/^#/, "");
 const IdParam = (description: string) =>
   Type.String({ description, minLength: 1, maxLength: MAX_ID_LENGTH });
 const SummaryParam = (description: string) =>
   Type.String({ description, maxLength: MAX_SUMMARY_LENGTH });
 
-/** Pi echoes invalid arguments, so discard only whole provider payloads above the byte budget. */
-function prepareArguments<T>(value: unknown): T {
-  const json = JSON.stringify(value);
-  return (json !== undefined && Buffer.byteLength(json, "utf8") > MAX_PREPARED_ARGUMENT_BYTES
-    ? 0
-    : value) as T;
-}
 const fmtTokens = (tokens: number) =>
   tokens < 1000 ? String(tokens) : `${(tokens / 1000).toFixed(1).replace(/\.0$/, "")}k`;
 
@@ -86,28 +81,17 @@ function previewText(text: string): string {
     : characters.join("");
 }
 
-function itemPreview(item: Item, byId: ReadonlyMap<string, OriginalMessage>): string {
+/** A root Pi omits from the model context is listed as an archive leaf with no live cost. */
+function itemPreview(item: Item, byId: OriginalsById): string {
+  const live = anchorId(item, byId) ? "" : " · not live · 0 tokens";
   if (item.kind === "fold") {
     const preview = previewText(item.summary) || "(empty summary)";
-    return `[#${item.id}] fold · ${item.children.length} direct children · ${originalIds([item]).length} messages · ${preview}`;
+    return `[#${item.id}] fold · ${item.children.length} direct children · ${originalIds([item]).length} messages${live} · ${preview}`;
   }
   const original = byId.get(item.id)!;
   const preview = previewText(serializeMessage(original.message)) || "(empty text projection)";
-  return `[#${item.id}] ${original.message.role} · ~${fmtTokens(estimateContextTokens(original.message))} tokens · ${preview}`;
-}
-
-function visibleTokens(roots: Forest, byId: ReadonlyMap<string, OriginalMessage>): number {
-  return roots.reduce((total, item) => {
-    if (item.kind === "message") return total + estimateContextTokens(byId.get(item.id)!.message);
-    const ids = originalIds([item]);
-    const hasProjectionAnchor = ids.some((id) => {
-      const message = byId.get(id)!.message;
-      return message.role !== "bashExecution" || !message.excludeFromContext;
-    });
-    if (!hasProjectionAnchor) return total;
-    const text = item.summary || `(folded archive: ${ids.length} messages)`;
-    return total + Math.ceil(text.length / 4);
-  }, 0);
+  const tokens = live || ` · ~${fmtTokens(liveTokens(original))} tokens`;
+  return `[#${item.id}] ${original.message.role}${tokens} · ${preview}`;
 }
 
 export default function infiniteContext(pi: ExtensionAPI) {
@@ -128,7 +112,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
         throw new Error(
           "This session already contains native compaction and is incompatible with infinite-context v2; start a new session.",
         );
-      const originals = branchOriginals(entries);
+      const originals = branchOriginals(entries, ctx.sessionManager.buildSessionProjection());
       let saved: Extract<SessionEntry, { type: "custom" }> | undefined;
       for (const entry of entries)
         if (entry.type === "custom" && entry.customType === INFINITE_CONTEXT_ENTRY)
@@ -155,12 +139,14 @@ export default function infiniteContext(pi: ExtensionAPI) {
       throw new Error(
         "Native compaction is incompatible with infinite-context v2; start a new session.",
       );
-    const originals = branchOriginals(entries);
+    const projection = ctx.sessionManager.buildSessionProjection();
+    const originals = branchOriginals(entries, projection);
     const derivedRoots = syncOriginals(roots, originals.map(({ id }) => id));
     validateToolUnitOwnership(derivedRoots, originals);
     return {
       roots: derivedRoots,
       originals,
+      positions: projectedPositions(projection),
       byId: new Map(originals.map((original) => [original.id, original] as const)),
     };
   };
@@ -176,9 +162,20 @@ export default function infiniteContext(pi: ExtensionAPI) {
   pi.on("context", async (event, ctx) => {
     if (stateError) return;
     const state = current(ctx);
-    return {
-      messages: buildOverlay(event.messages, state.originals, state.roots),
-    };
+    try {
+      return {
+        messages: buildOverlay(event.messages, state.positions, state.originals, state.roots),
+      };
+    } catch (error) {
+      // Without a trustworthy position mapping, folding the request could drop a
+      // tool result and break the turn: leave the request untouched and say so.
+      if (!(error instanceof ProjectionMismatchError)) throw error;
+      ctx.ui.notify(
+        `infinite-context: folds are not applied to this request. ${error.message}`,
+        "error",
+      );
+      return;
+    }
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
@@ -219,13 +216,12 @@ export default function infiniteContext(pi: ExtensionAPI) {
     name: "context_map",
     label: "Context map",
     description:
-      "List ordered visible roots, or the direct children of one fold. Output is paginated and previews are bounded; it never recursively dumps a subtree.",
+      "List ordered roots, or the direct children of one fold. Output is paginated and previews are bounded; it never recursively dumps a subtree.",
     parameters: Type.Object({
-      id: Type.Optional(IdParam("Fold id whose direct children to list. Omit for visible roots.")),
+      id: Type.Optional(IdParam("Fold id whose direct children to list. Omit for the roots.")),
       ...PageParams,
     }),
     executionMode: "sequential",
-    prepareArguments,
     async execute(_callId, params, _signal, _update, ctx) {
       const state = current(ctx);
       const page = parsePage(params.offset, params.limit);
@@ -254,7 +250,6 @@ export default function infiniteContext(pi: ExtensionAPI) {
       ...PageParams,
     }),
     executionMode: "sequential",
-    prepareArguments,
     async execute(_callId, params, _signal, _update, ctx) {
       const state = current(ctx);
       const id = bareId(params.id);
@@ -287,7 +282,6 @@ export default function infiniteContext(pi: ExtensionAPI) {
       }),
     }),
     executionMode: "sequential",
-    prepareArguments,
     async execute(_callId, params, _signal, _update, ctx) {
       const state = current(ctx);
       const groups = params.patterns.map((source) => {
@@ -325,26 +319,25 @@ export default function infiniteContext(pi: ExtensionAPI) {
     name: "context_fold",
     label: "Context fold",
     description:
-      "Wrap contiguous currently visible root ranges in new folds. Each explicit summary is the new fold's projection; existing folds become children unchanged. The batch is all-or-nothing and tool calls/results remain indivisible.",
+      "Wrap contiguous root ranges in new folds. Each explicit summary is the new fold's projection; existing folds become children unchanged. The batch is all-or-nothing and tool calls/results remain indivisible.",
     promptSnippet: "Fold completed context into a searchable recursive archive before the context limit",
     promptGuidelines: [
       "Use context_fold proactively after completed exploration, debugging, implementation, or verification phases and after large tool results; native compaction is blocked.",
-      "Keep governing instructions, the active request, unresolved errors, open decisions, and evidence needed soon as visible roots. Fold only when the replacement is worthwhile.",
+      "Keep governing instructions, the active request, unresolved errors, open decisions, and evidence needed soon as roots. Fold only when the replacement is worthwhile.",
       "Write a short context_fold summary containing durable state, decisions, open loops, paths/symbols, and gotchas; use an empty summary only for disposable noise.",
-      "Use context_map for root ids, context_search to locate archived text, context_peek to read it, and context_summary to replace only a visible root fold summary. Reads never unfold context.",
+      "Use context_map for root ids, context_search to locate archived text, context_peek to read it, and context_summary to replace only a root fold summary. Reads never unfold context.",
     ],
     parameters: Type.Object({
       items: Type.Array(
         Type.Object({
-          from: IdParam("First visible root id."),
-          to: Type.Optional(IdParam("Inclusive visible root id; defaults to from.")),
+          from: IdParam("First root id."),
+          to: Type.Optional(IdParam("Inclusive root id; defaults to from.")),
           summary: SummaryParam("Exact new fold summary; an empty string is allowed."),
         }),
         { minItems: 1, maxItems: 50, description: "Disjoint root ranges; the mutation is atomic." },
       ),
     }),
     executionMode: "sequential",
-    prepareArguments,
     async execute(_callId, params, _signal, _update, ctx) {
       const state = current(ctx);
       const requests = params.items.map((item) => ({
@@ -379,13 +372,12 @@ export default function infiniteContext(pi: ExtensionAPI) {
     name: "context_summary",
     label: "Context summary",
     description:
-      "Replace the summary of one currently visible root fold. Hidden fold summaries are immutable; an empty string clears the summary.",
+      "Replace the summary of one root fold. Hidden fold summaries are immutable; an empty string clears the summary.",
     parameters: Type.Object({
-      id: IdParam("Visible root fold id."),
+      id: IdParam("Root fold id."),
       summary: SummaryParam("Exact replacement summary; empty clears it."),
     }),
     executionMode: "sequential",
-    prepareArguments,
     async execute(_callId, params, _signal, _update, ctx) {
       const state = current(ctx);
       const id = bareId(params.id);

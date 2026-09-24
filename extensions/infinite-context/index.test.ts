@@ -12,11 +12,12 @@ import type {
   SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import infiniteContext from "./index.ts";
-import { MAX_OUTPUT_BYTES } from "./output.ts";
 import {
   assistantMessage,
   bashMessage,
+  linkEntries,
   messageEntry,
+  projectionOf,
   toolResultMessage,
   userMessage,
 } from "./pi-test-fixtures.ts";
@@ -65,7 +66,10 @@ function harness(initial: SessionEntry[]) {
     sendMessage() {},
   } as unknown as ExtensionAPI;
   const ctx = {
-    sessionManager: { getBranch: () => entries },
+    sessionManager: {
+      getBranch: () => linkEntries(entries),
+      buildSessionProjection: () => projectionOf(entries),
+    },
     ui: { notify: (text: string) => notifications.push(text) },
     getContextUsage: () => ({ contextWindow: 100_000, tokens: 10_000 }),
   } as unknown as ExtensionContext;
@@ -189,37 +193,20 @@ test("folding only excluded bash reports the actual zero provider-context delta"
   assert.match(result.content[0].text, /no estimated context change/);
 });
 
-test("generic argument budget bounds the real Pi validation-error path", () => {
+test("maximal tool arguments pass Pi's own schema validation", () => {
   const h = harness([entry("u1", "user", "one", 1)]);
   const validate = (name: string, arguments_: unknown) => {
     const tool = h.tools.get(name)!;
-    const prepared = tool.prepareArguments?.(arguments_) ?? arguments_;
     const call: ToolCall = {
       type: "toolCall",
       id: "call",
       name,
-      arguments: prepared as ToolCall["arguments"],
+      arguments: arguments_ as ToolCall["arguments"],
     };
     return validateToolArguments(tool as unknown as AiTool, call);
   };
-  const validationError = (name: string, arguments_: unknown) => {
-    let caught: Error | undefined;
-    try {
-      validate(name, arguments_);
-    } catch (error) {
-      caught = error as Error;
-    }
-    assert.ok(caught, "expected schema validation failure");
-    return `Error: ${caught.message}`;
-  };
 
-  // Valid provider JSON passes preparation unchanged, including the largest ASCII summary.
   assert.deepEqual(validate("context_map", {}), {});
-  assert.deepEqual(validate("context_peek", { id: "u1", offset: 1, limit: 100 }), {
-    id: "u1",
-    offset: 1,
-    limit: 100,
-  });
   assert.deepEqual(validate("context_search", { patterns: ["needle"] }), {
     patterns: ["needle"],
   });
@@ -235,30 +222,11 @@ test("generic argument budget bounds the real Pi validation-error path", () => {
     }],
   };
   assert.deepEqual(validate("context_fold", maximalFold), maximalFold);
-
-  const huge = "😀\n\\\"".repeat(50_000);
-  const errors = [
-    validationError("context_peek", null),
-    validationError("context_peek", {}),
-    validationError("context_search", { patterns: {} }),
-    validationError("context_fold", { items: Array.from({ length: 1000 }, () => ({})) }),
-    // This stays just below the guard and maximizes per-element TypeBox paths.
-    validationError("context_search", { patterns: Array.from({ length: 6649 }, () => 0) }),
-    validationError("context_summary", { summary: "x".repeat(12_000) }),
-    validationError("context_summary", { summary: "😀\n\\\"".repeat(1000) }),
-    validationError("context_peek", { id: huge }),
-    validationError("context_search", { patterns: [huge] }),
-    validationError("context_fold", { items: [{ from: "u1", summary: huge }] }),
-  ];
-  for (const error of errors)
-    assert.ok(
-      Buffer.byteLength(error, "utf8") < MAX_OUTPUT_BYTES,
-      `validation error exceeded ${MAX_OUTPUT_BYTES} bytes`,
-    );
-  assert.doesNotMatch(errors.at(-1)!, /😀{100}/);
+  // Oversized arguments are rejected by Pi with its own actionable schema error.
+  assert.throws(() => validate("context_fold", { items: [{ summary: "no from id" }] }));
 });
 
-test("reload rejects v2 snapshots that split or hide unfinished tool units", async () => {
+test("reload rejects a split tool unit and accepts a folded abandoned call", async () => {
   const assistant = entry(
     "a1",
     "assistant",
@@ -287,24 +255,27 @@ test("reload rejects v2 snapshots that split or hide unfinished tool units", asy
   await split.emit("session_start");
   assert.match(split.notifications[0], /splits an assistant tool call/);
 
-  const unfinished = harness([
+  // An abandoned call is a complete unit: a snapshot folding it stays loadable.
+  const abandoned = harness([
     assistant,
+    messageEntry("u2", userMessage("next", 2)),
     {
       type: "custom",
       id: "state",
-      parentId: "a1",
-      timestamp: new Date(2).toISOString(),
+      parentId: "u2",
+      timestamp: new Date(3).toISOString(),
       customType: "infinite-context",
       data: {
         version: 2,
         roots: [
-          { kind: "fold", id: "fold-a", summary: "pending", children: [{ kind: "message", id: "a1" }] },
+          { kind: "fold", id: "fold-a", summary: "abandoned", children: [{ kind: "message", id: "a1" }] },
+          { kind: "message", id: "u2" },
         ],
       },
     },
   ]);
-  await unfinished.emit("session_start");
-  assert.match(unfinished.notifications[0], /unfinished tool-call unit/);
+  await abandoned.emit("session_start");
+  assert.deepEqual(abandoned.notifications, []);
 });
 
 test("old snapshots and pre-compacted sessions are rejected rather than interpreted", async () => {

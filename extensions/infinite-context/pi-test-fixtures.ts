@@ -1,5 +1,9 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import {
+  buildSessionProjection,
+  type SessionEntry,
+  type SessionProjection,
+} from "@earendil-works/pi-coding-agent";
 
 const usage = {
   input: 0,
@@ -79,7 +83,40 @@ export const messageEntry = (id: string, message: AgentMessage): SessionEntry =>
   message,
 });
 
-export const original = (id: string, message: AgentMessage) => ({ id, message });
+/** An original the model receives exactly as it was persisted. */
+export const original = (id: string, message: AgentMessage) => ({ id, message, live: message });
+
+/** An archive leaf Pi keeps out of the model context (context edit or excluded bash). */
+export const omittedOriginal = (id: string, message: AgentMessage) => ({
+  id,
+  message,
+  live: undefined,
+});
+
+/**
+ * The projection positions implied by a list of originals.
+ *
+ * Mirrors Pi: an entry omitted by `context_edit` has no position, while excluded
+ * bash output still occupies one (Pi drops it later, at the provider boundary),
+ * so it has a position but no live message.
+ */
+export const positionsOf = (
+  originals: readonly { id: string; message: AgentMessage; live?: AgentMessage }[],
+) =>
+  originals.flatMap(({ id, message, live }) =>
+    live
+      ? [{ id, message: live }]
+      : message.role === "bashExecution" && message.excludeFromContext
+        ? [{ id, message }]
+        : [],
+  );
+
+/** A real session is one parent chain; test fixtures declare entries in branch order. */
+export const linkEntries = (entries: readonly SessionEntry[]): SessionEntry[] =>
+  entries.map((entry, i) => ({ ...entry, parentId: i === 0 ? null : entries[i - 1].id }));
+
+export const projectionOf = (entries: SessionEntry[]): SessionProjection =>
+  buildSessionProjection(linkEntries(entries));
 
 /** One user turn, two parallel calls with both results, then a plain reply. */
 export const completedTools = () => [
