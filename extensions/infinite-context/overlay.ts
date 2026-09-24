@@ -25,7 +25,8 @@ export function buildOverlay(
 ): AgentMessage[] {
   if (positions.length > messages.length)
     throw new ProjectionMismatchError(
-      `The request has ${messages.length} messages but the session projection has ${positions.length}`,
+      `The request ends after ${messages.length} messages, before projected entry ` +
+        `"${positions[messages.length].id}" (${positions[messages.length].message.role})`,
     );
   for (let i = 0; i < positions.length; ++i)
     if (positions[i].message !== messages[i] && !isDeepStrictEqual(positions[i].message, messages[i]))

@@ -4,7 +4,9 @@ import { messageItem, originalIds, wrapRootRanges } from "./forest.ts";
 import {
   assistantMessage,
   completedTools,
+  omittedOriginal,
   original,
+  toolResultMessage,
   userMessage,
 } from "./pi-test-fixtures.ts";
 import { planRootRanges } from "./plan-root-ranges.ts";
@@ -88,4 +90,17 @@ test("nested fold children remain identity-preserving roots for later folding", 
   assert.deepEqual(originalIds(outer), originals.map(({ id }) => id));
   assert.equal(outer[0].kind, "fold");
   assert.equal((outer[0] as { children: readonly { id: string }[] }).children[1].id, "f1");
+});
+
+test("folding an omitted original does not swallow the surrounding tool unit", () => {
+  const originals = [
+    original("a1", assistantMessage([call("c1")], 1)),
+    omittedOriginal("edited", userMessage("(edited away)", 2)),
+    original("r1", toolResultMessage("c1", "done", 3)),
+    original("a2", assistantMessage([{ type: "text", text: "next" }], 4)),
+  ];
+  const roots = originals.map(({ id }) => messageItem(id));
+  assert.deepEqual(planRootRanges(roots, originals, [{ from: "edited", summary: "" }]), [
+    { first: 1, last: 1, summary: "" },
+  ]);
 });

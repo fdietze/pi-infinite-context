@@ -16,6 +16,9 @@ interface Message {
 
 const FOLD_SUMMARY = "ARCHIVED: greeting and the aborted attempt";
 
+const strippedEnv = () =>
+  Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("PI_")));
+
 test("a scripted fold replaces the archived messages in the provider transcript", () => {
   const transcript = join(mkdtempSync(join(tmpdir(), "infinite-context-e2e-")), "transcript.jsonl");
   execFileSync(
@@ -33,7 +36,10 @@ test("a scripted fold replaces the archived messages in the provider transcript"
       "say hello",
     ],
     {
-      env: { ...process.env, E2E_TRANSCRIPT: transcript },
+      // A Pi session exports PI_* routing variables (package dir, session file).
+      // Inheriting them would point the child at another installation, so the
+      // fake-provider run builds its own environment.
+      env: { ...strippedEnv(), E2E_TRANSCRIPT: transcript },
       encoding: "utf8",
       timeout: 120_000,
       stdio: ["ignore", "pipe", "pipe"],

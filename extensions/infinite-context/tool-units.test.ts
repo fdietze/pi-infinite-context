@@ -6,9 +6,10 @@ import {
   completedTools,
   omittedOriginal,
   original,
+  toolResultMessage,
   userMessage,
 } from "./pi-test-fixtures.ts";
-import { toolUnits, validateToolUnitOwnership } from "./tool-units.ts";
+import { toolUnits, unitMembers, validateToolUnitOwnership } from "./tool-units.ts";
 
 const call = (id: string) => ({ type: "toolCall" as const, id, name: "read", arguments: {} });
 
@@ -66,4 +67,22 @@ test("ownership validation rejects a unit split across roots", () => {
     () => validateToolUnitOwnership(roots, originals),
     /splits the tool call of "a1"/,
   );
+});
+
+test("an omitted original between a call and its result belongs to no unit", () => {
+  const originals = [
+    original("a1", assistantMessage([call("c1")], 1)),
+    omittedOriginal("edited", userMessage("(edited away)", 2)),
+    original("r1", toolResultMessage("c1", "done", 3)),
+    original("a2", assistantMessage([{ type: "text", text: "next" }], 4)),
+  ];
+  const units = toolUnits(originals);
+  assert.deepEqual(units.start, [0, 1, 0, 3]);
+  assert.deepEqual(units.end, [2, 1, 2, 3]);
+  assert.deepEqual(unitMembers(units, 0), [0, 2]);
+  // Folding only the omitted root leaves the live call and result as roots.
+  const roots = wrapRootRanges(originals.map(({ id }) => messageItem(id)), [
+    { first: 1, last: 1, id: "fold-edited", summary: "" },
+  ]);
+  assert.doesNotThrow(() => validateToolUnitOwnership(roots, originals));
 });

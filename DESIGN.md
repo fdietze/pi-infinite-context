@@ -37,7 +37,7 @@ The invariants are:
 1. Leaves contain every addressable original on the current branch exactly once and in branch order.
 2. Node IDs are globally unique. Fold IDs do not reuse Pi session-entry IDs.
 3. A fold has at least one child. Its summary is a projection of that node, not another child.
-4. A live assistant tool call and its live results stay in the same root or fold subtree. Tool units have live members only, so an omitted entry between a call and its result belongs to no unit. The pending unit cannot be folded; every other range can, including abandoned calls whose results never arrived.
+4. A live assistant tool call and its live results either all remain unfolded roots, or are folded together into one subtree. Tool units have live members only, so an omitted entry between a call and its result belongs to no unit. The pending unit cannot be folded; every other range can, including abandoned calls whose results never arrived.
 5. A mutation appends one complete snapshot only after all validation succeeds. Reads append nothing.
 
 New branch messages are appended as roots when state is derived. Session reload and tree navigation reconstruct from the last snapshot on that current branch. Old span snapshots and branches containing native compaction are rejected with a new-session instruction; there is intentionally no migration layer.
