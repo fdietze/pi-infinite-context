@@ -79,7 +79,7 @@ test("folding an abandoned call removes it from the request without orphaning re
   ]);
   const request = projection.messages.filter((message) => message.role !== "system");
   const output = buildOverlay(request, positions, originals, roots);
-  assert.equal(output[0].role === "user" && output[0].content, "early work");
+  assert.equal(output[0].role === "user" && output[0].content, "[#fold-a] archived fold summary:\nearly work");
   assert.deepEqual(output.slice(1), request.slice(-2));
   assert.equal(
     output.filter((message) => message.role === "assistant" && JSON.stringify(message.content).includes("q1")).length,

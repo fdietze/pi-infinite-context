@@ -59,7 +59,8 @@ test("a scripted fold replaces the archived messages in the provider transcript"
   const last = live(requests.at(-1)!.messages);
   // The fold summary reached the provider as one message, in place of the archived turns.
   assert.equal(last.filter((message) => message.text.includes(FOLD_SUMMARY)).length, 1);
-  assert.equal(last[0].text, FOLD_SUMMARY);
+  // It is marked as archive content and names its fold id.
+  assert.match(last[0].text, new RegExp(`^\\[#fold-[0-9a-f]{8}\\] archived fold summary:\n${FOLD_SUMMARY}$`));
   assert.ok(
     !last.some((message) => message.toolCallIds.includes("call_1_0") || message.toolCallId === "call_1_0"),
     "an archived tool exchange is still in the transcript",

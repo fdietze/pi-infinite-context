@@ -4,7 +4,7 @@ Keep working in one [Pi](https://pi.dev/) session for longer. The agent replaces
 
 ## How it works
 
-1. **Fold:** The agent groups a stretch of its context into a **fold** and writes a summary. The model sees that summary instead of the messages inside.
+1. **Fold:** The agent groups a stretch of its context into a **fold** and writes a summary. The model sees that summary, labeled with the fold's ID, instead of the messages inside.
 2. **Fold again:** A new fold can contain earlier folds and more messages. Their summaries and original messages stay intact.
 3. **Find:** The agent can search the archive and read what it needs. Reading does not unfold anything or change the fold tree.
 

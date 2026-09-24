@@ -45,7 +45,7 @@ New branch messages are appended as roots when state is derived. Session reload 
 ## Operations
 
 - `context_map({id?, offset?, limit?})` lists roots, or one fold's direct children. Roots Pi omits from the model context are listed as `not live · 0 tokens`. It never recursively dumps a subtree.
-- `context_peek({id, offset?, limit?})` reads one original's authoritative text projection or exactly one fold summary. Lines are 1-based; the default limit is 100 and the footer always reports total item lines.
+- `context_peek({id, offset?, limit?})` reads one original's authoritative text projection or exactly one fold summary as written, without the overlay's marker line. Lines are 1-based; the default limit is 100 and the footer always reports total item lines.
 - `context_search({patterns})` searches every raw current-branch original and every reachable fold summary once. Results contain stable IDs, parent-fold location and lookup-compatible line numbers.
 - `context_fold({items})` atomically wraps disjoint contiguous root ranges. Each item has an explicit summary, which may be empty. Tool-unit boundaries expand the range when necessary. Existing folds remain unchanged children; summaries are never concatenated.
 - `context_summary({id, summary})` replaces only a root fold's summary. Hidden summaries are immutable.
@@ -58,7 +58,7 @@ There is no unfold operation and no persistent navigation state.
 
 Pi builds each request from its session projection (`buildSessionProjection()`, `context_edit` applied) and appends whatever is not persisted yet, so the projection minus system messages is a deep-equal prefix of the `context` event messages. That prefix gives every request position its owning entry id — no timestamp or content matching is needed.
 
-The overlay walks the request: a fold emits one synthetic user message at its anchor, containing its summary or a small empty-summary placeholder; its other members are dropped; a fold without a live member emits nothing; everything else, including the unpersisted tail, passes through unchanged. If the request does not start with the projection, the extension notifies an error and returns the request untouched rather than risking a dropped tool result.
+The overlay walks the request: a fold emits one synthetic user message at its anchor: a marker line `[#<fold id>] archived fold summary:`, then its summary or a small empty-summary placeholder. The marker keeps archive text distinct from real user text and hands the model the id it needs for `context_summary` and `context_peek`; its other members are dropped; a fold without a live member emits nothing; everything else, including the unpersisted tail, passes through unchanged. If the request does not start with the projection, the extension notifies an error and returns the request untouched rather than risking a dropped tool result.
 
 The raw session branch is never rewritten, so original typed message objects and image sources remain there. Lookup/search use one text serializer. It labels images rather than claiming their binary data is lossless text, and includes the serializer's existing assistant-thinking/tool-call projections.
 

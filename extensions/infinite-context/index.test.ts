@@ -146,7 +146,7 @@ test("fold persists v2, overlays one summary, and reloads its own snapshot", asy
   assert.equal(overlay.messages.length, 1);
   assert.equal(
     overlay.messages[0].role === "user" && overlay.messages[0].content,
-    "both",
+    `[#${(result.details as { ids: string[] }).ids[0]}] archived fold summary:\nboth`,
   );
 
   await h.emit("session_start", { reason: "reload" });
