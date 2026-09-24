@@ -15,9 +15,10 @@
   },
   "scripts": {
     "typecheck": "tsgo -p tsconfig.json",
-    "lint": "oxlint extensions",
+    "lint": "oxlint extensions e2e",
     "test": "find extensions -name '*.test.ts' -print0 | xargs -0 -r node --test",
-    "ci": "npm run typecheck && npm run lint && npm run test"
+    "ci": "npm run typecheck && npm run lint && npm run test",
+    "e2e": "node --test e2e/*.e2e.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

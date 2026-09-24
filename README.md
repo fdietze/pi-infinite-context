@@ -51,6 +51,7 @@ Start a new session after installing. Sessions with old extension data or earlie
 ```bash
 nix develop -c npm ci
 nix develop -c npm run ci
+nix develop -c npm run e2e   # drives the real pi binary with a scripted provider
 ```
 
 See [DESIGN.md](DESIGN.md) for the data model and exact tool rules.
