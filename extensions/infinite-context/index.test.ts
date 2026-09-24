@@ -222,8 +222,12 @@ test("maximal tool arguments pass Pi's own schema validation", () => {
     }],
   };
   assert.deepEqual(validate("context_fold", maximalFold), maximalFold);
-  // Oversized arguments are rejected by Pi with its own actionable schema error.
-  assert.throws(() => validate("context_fold", { items: [{ summary: "no from id" }] }));
+  // Invalid arguments are rejected by Pi with its own actionable schema error.
+  assert.throws(
+    () => validate("context_summary", { id: "fold", summary: "x".repeat(12_001) }),
+    /must not have more than 12000 characters/,
+  );
+  assert.throws(() => validate("context_fold", { items: [{ summary: "no from id" }] }), /from/);
 });
 
 test("reload rejects a split tool unit and accepts a folded abandoned call", async () => {
