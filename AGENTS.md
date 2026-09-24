@@ -7,13 +7,15 @@
 - `extensions/infinite-context/forest.ts`: pure recursive archive state and transforms.
 - `extensions/infinite-context/originals.ts`: branch entries joined with their live message from Pi's session projection.
 - `extensions/infinite-context/serialize-message.ts`: authoritative text projection of one message.
+- `extensions/infinite-context/preview-message.ts`: compact preview projection of one message for map lines.
+- `extensions/infinite-context/render-map.ts`: complete `context_map` listing that fits the output budget.
 - `extensions/infinite-context/fold-projection.ts`: anchors, fold summary text and live token cost.
 - `extensions/infinite-context/tool-units.ts`: live tool-call units, the pending unit, and snapshot ownership validation.
 - `extensions/infinite-context/plan-root-ranges.ts`: fold request resolution and tool-unit range expansion.
 - `extensions/infinite-context/id-errors.ts`: actionable errors for caller-supplied ids.
 - `extensions/infinite-context/overlay.ts`: request-copy context overlay.
 - `extensions/infinite-context/search.ts`: pure archive regex search.
-- `extensions/infinite-context/output.ts`: line windows and global output limits.
+- `extensions/infinite-context/output.ts`: line windows, token formatting, and global output limits.
 - `extensions/infinite-context/nudge.ts`: proactive folding threshold policy.
 - `extensions/infinite-context/*.test.ts`: unit, property, and integration tests.
 - `e2e/`: end-to-end test driving the real `pi` binary with a scripted fake provider.

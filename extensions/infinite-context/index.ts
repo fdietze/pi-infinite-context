@@ -7,24 +7,17 @@ import type {
 import { Type } from "typebox";
 import {
   type Forest,
-  type Item,
   INFINITE_CONTEXT_ENTRY,
   allItems,
   findItem,
   messageItem,
-  originalIds,
   parseSnapshot,
   replaceRootSummary,
   snapshot,
   syncOriginals,
   wrapRootRanges,
 } from "./forest.ts";
-import {
-  type OriginalsById,
-  anchorId,
-  liveTokens,
-  visibleTokens,
-} from "./fold-projection.ts";
+import { visibleTokens } from "./fold-projection.ts";
 import { notAFoldRootError, unknownIdError } from "./id-errors.ts";
 import { branchOriginals, projectedPositions } from "./originals.ts";
 import { ProjectionMismatchError, buildOverlay } from "./overlay.ts";
@@ -32,10 +25,12 @@ import { planRootRanges } from "./plan-root-ranges.ts";
 import { serializeMessage } from "./serialize-message.ts";
 import { validateToolUnitOwnership } from "./tool-units.ts";
 import { planNudge } from "./nudge.ts";
+import { renderMap } from "./render-map.ts";
 import {
   DEFAULT_PAGE_LIMIT,
   MAX_PAGE_LIMIT,
   boundOutput,
+  fmtTokens,
   lineWindow,
   parsePage,
 } from "./output.ts";
@@ -54,9 +49,6 @@ const IdParam = (description: string) =>
   Type.String({ description, minLength: 1, maxLength: MAX_ID_LENGTH });
 const SummaryParam = (description: string) =>
   Type.String({ description, maxLength: MAX_SUMMARY_LENGTH });
-
-const fmtTokens = (tokens: number) =>
-  tokens < 1000 ? String(tokens) : `${(tokens / 1000).toFixed(1).replace(/\.0$/, "")}k`;
 
 const PageParams = {
   offset: Type.Optional(
@@ -81,19 +73,6 @@ function previewText(text: string): string {
   return characters.length > 100
     ? `${characters.slice(0, 100).join("")}…`
     : characters.join("");
-}
-
-/** A root Pi omits from the model context is listed as an archive leaf with no live cost. */
-function itemPreview(item: Item, byId: OriginalsById): string {
-  const live = anchorId(item, byId) ? "" : " · not live · 0 tokens";
-  if (item.kind === "fold") {
-    const preview = previewText(item.summary) || "(empty summary)";
-    return `[#${item.id}] fold · ${item.children.length} direct children · ${originalIds([item]).length} messages${live} · ${preview}`;
-  }
-  const original = byId.get(item.id)!;
-  const preview = previewText(serializeMessage(original.message)) || "(empty text projection)";
-  const tokens = live || ` · ~${fmtTokens(liveTokens(original))} tokens`;
-  return `[#${item.id}] ${original.message.role}${tokens} · ${preview}`;
 }
 
 export default function infiniteContext(pi: ExtensionAPI) {
@@ -218,25 +197,21 @@ export default function infiniteContext(pi: ExtensionAPI) {
     name: "context_map",
     label: "Context map",
     description:
-      "List ordered roots, or the direct children of one fold. Output is paginated and previews are bounded; it never recursively dumps a subtree.",
+      "List all ordered roots, or all direct children of one fold, in one response: " +
+      "`[#id] <role> ~<tokens> · <preview>` per message, `[#id] fold <N> msgs ~<tokens> · <summary preview>` per fold, " +
+      "`not live` instead of tokens when Pi omits it from context. Previews shrink when needed so every item is listed; it never recursively dumps a subtree.",
     parameters: Type.Object({
       id: Type.Optional(IdParam("Fold id whose direct children to list. Omit for the roots.")),
-      ...PageParams,
     }),
     executionMode: "sequential",
     async execute(_callId, params, _signal, _update, ctx) {
       const state = current(ctx);
-      const page = parsePage(params.offset, params.limit);
       const id = params.id === undefined ? undefined : bareId(params.id);
       const listing = directItems(state.roots, id);
-      const start = page.offset - 1;
-      const selected = listing.items.slice(start, start + page.limit);
-      const rows = selected.map((item) => itemPreview(item, state.byId));
-      const end = selected.length ? start + selected.length : start;
-      const footer = `${listing.label}: items ${selected.length ? `${page.offset}-${end}` : "none"} of ${listing.items.length}`;
+      const map = renderMap(listing.label, listing.items, state.byId);
       return {
-        content: [{ type: "text", text: boundOutput([...rows, footer].join("\n")) }],
-        details: { count: selected.length, total: listing.items.length, id },
+        content: [{ type: "text", text: map.text }],
+        details: { count: listing.items.length, previewChars: map.previewChars, id },
       };
     },
   });

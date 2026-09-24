@@ -44,7 +44,7 @@ New branch messages are appended as roots when state is derived. Session reload 
 
 ## Operations
 
-- `context_map({id?, offset?, limit?})` lists roots, or one fold's direct children. Roots Pi omits from the model context are listed as `not live · 0 tokens`. It never recursively dumps a subtree.
+- `context_map({id?})` lists all roots, or all of one fold's direct children, in one response. Lines are `[#id] <role> ~<tokens> · <preview>` and `[#id] fold <N> msgs ~<tokens> · <summary preview>`; items Pi omits from the model context say `not live` instead of tokens. Previews are the first 40 code points of a compact preview projection (`preview-message.ts`: assistant thinking dropped, tool calls as `<name> <argument values>`), separate from the authoritative serialization. It never recursively dumps a subtree.
 - `context_peek({id, offset?, limit?})` reads one original's authoritative text projection or exactly one fold summary as written, without the overlay's marker line. Lines are 1-based; the default limit is 100 and the footer always reports total item lines.
 - `context_search({patterns})` searches every raw current-branch original and every reachable fold summary once. Results contain stable IDs, parent-fold location and lookup-compatible line numbers.
 - `context_fold({items})` atomically wraps disjoint contiguous root ranges. Each item has an explicit summary, which may be empty. Tool-unit boundaries expand the range when necessary. Existing folds remain unchanged children; summaries are never concatenated.
@@ -66,7 +66,7 @@ Originals Pi omits from the model context stay searchable archive leaves with ze
 
 ## Output safety
 
-Map and search synthesize aggregate output that never lived in context as one unit, so they share a final UTF-8 byte/line cap; previews and search lines are bounded, and search emission is capped and asks the caller to refine the regex. Peek is exempt: it returns exactly one item, which is either an original message that already fit in context once or a schema-bounded fold summary, so it is returned whole and paged only by line offset/limit — a single over-long line is never clipped into an unreachable tail. No tool writes a recursive archive dump to model context.
+Map and search synthesize aggregate output that never lived in context as one unit, so both respect the UTF-8 byte cap. The map is the id index and favors completeness over detail: it shrinks all previews uniformly, down to none, until every item fits, and says so in its footer; a bare index that still exceeds the cap is returned whole. Search lines are bounded, and search emission is capped and asks the caller to refine the regex. Peek is exempt: it returns exactly one item, which is either an original message that already fit in context once or a schema-bounded fold summary, so it is returned whole and paged only by line offset/limit — a single over-long line is never clipped into an unreachable tail. No tool writes a recursive archive dump to model context.
 
 Token sizes are documented estimates. Fold and summary results report the signed estimated live-context delta, so a large summary may correctly report growth rather than false savings.
 
@@ -79,13 +79,15 @@ Token sizes are documented estimates. Fold and summary results report the signed
 - `forest.ts`: snapshot types, parsing, traversal, invariant-preserving transforms.
 - `originals.ts`: raw branch entries joined with their live message.
 - `serialize-message.ts`: authoritative text projection of one message.
+- `preview-message.ts`: compact preview projection of one message for map lines.
 - `fold-projection.ts`: anchors, fold summary text, live token cost.
 - `tool-units.ts`: live tool units, the pending unit, snapshot ownership validation.
 - `plan-root-ranges.ts`: fold request resolution and tool-unit expansion.
 - `overlay.ts`: the request overlay.
 - `id-errors.ts`: actionable errors for caller-supplied ids.
 - `search.ts`: pure regex archive search.
-- `output.ts`: pagination and global output budgets.
+- `render-map.ts`: complete map listing that fits the output budget.
+- `output.ts`: line windows, token formatting, and global output budgets.
 - `nudge.ts`: pure proactive-nudge policy.
 - `index.ts`: Pi event/tool shell and persistence.
 - `*.test.ts`: property, unit and public integration tests.

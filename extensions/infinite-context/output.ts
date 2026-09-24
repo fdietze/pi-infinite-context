@@ -3,6 +3,10 @@ export const MAX_OUTPUT_LINES = 2000;
 export const DEFAULT_PAGE_LIMIT = 100;
 export const MAX_PAGE_LIMIT = 2000;
 
+/** Compact token count for tool output: `950`, `2.5k`. */
+export const fmtTokens = (tokens: number) =>
+  tokens < 1000 ? String(tokens) : `${(tokens / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+
 export interface LineWindow {
   readonly text: string;
   readonly totalLines: number;

@@ -20,7 +20,7 @@ The agent uses these five tools:
 | --- | --- |
 | `context_fold` | Groups a stretch of visible context into a fold with a new summary. |
 | `context_summary` | Rewrites the summary of a visible fold, without changing its contents. |
-| `context_map` | Lists the visible context, or the direct contents of one fold. |
+| `context_map` | Lists the whole visible context, or the direct contents of one fold, as one compact line per item. |
 | `context_search` | Searches original messages and fold summaries using regular expressions. |
 | `context_peek` | Reads one original message or fold summary by ID, with an optional line range. |
 
