@@ -1,5 +1,6 @@
 import type { Forest } from "./forest.ts";
-import { allItems, originalIds } from "./forest.ts";
+import { originalIds } from "./forest.ts";
+import { notARootError } from "./id-errors.ts";
 import type { OriginalMessage } from "./originals.ts";
 import { toolUnits } from "./tool-units.ts";
 
@@ -13,18 +14,6 @@ export interface PlannedRange {
   readonly first: number;
   readonly last: number;
   readonly summary: string;
-}
-
-/** Errors name the offending id or item and the next step, so the model can retry without guessing. */
-function endpointError(roots: Forest, id: string): Error {
-  const containing = roots.find(
-    (root) => root.kind === "fold" && allItems([root]).some((item) => item.id === id),
-  );
-  if (containing)
-    return new Error(
-      `"${id}" is not a root: it is inside fold "${containing.id}". Fold "${containing.id}" instead.`,
-    );
-  return new Error(`"${id}" is not a root. Call context_map for the current root ids.`);
 }
 
 /**
@@ -53,8 +42,8 @@ export function planRootRanges(
   const planned = requests.map((request, item) => {
     const a = rootIndex.get(request.from);
     const b = rootIndex.get(request.to ?? request.from);
-    if (a === undefined) throw endpointError(roots, request.from);
-    if (b === undefined) throw endpointError(roots, request.to ?? request.from);
+    if (a === undefined) throw notARootError(roots, request.from);
+    if (b === undefined) throw notARootError(roots, request.to ?? request.from);
     let first = Math.min(a, b);
     let last = Math.max(a, b);
     let changed = true;

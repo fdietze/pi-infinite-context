@@ -253,7 +253,7 @@ test("reload rejects a split tool unit and accepts a folded abandoned call", asy
     },
   ]);
   await split.emit("session_start");
-  assert.match(split.notifications[0], /splits an assistant tool call/);
+  assert.match(split.notifications[0], /splits the tool call of "a1"/);
 
   // An abandoned call is a complete unit: a snapshot folding it stays loadable.
   const abandoned = harness([
@@ -308,4 +308,36 @@ test("old snapshots and pre-compacted sessions are rejected rather than interpre
   }]);
   await compacted.emit("session_start");
   assert.match(compacted.notifications[0], /already contains native compaction/);
+});
+
+test("id errors name the id and the next step", async () => {
+  const h = harness([entry("u1", "user", "one", 1), entry("u2", "user", "two", 2)]);
+  await h.emit("session_start");
+  await h.tools.get("context_fold")!.execute(
+    "call",
+    { items: [{ from: "u1", to: "u2", summary: "both" }] },
+    undefined,
+    undefined,
+    h.ctx,
+  );
+  const foldId = (h.entries().at(-1) as { data: { roots: { id: string }[] } }).data.roots[0].id;
+  const call = (name: string, params: Record<string, unknown>) =>
+    h.tools.get(name)!.execute("call", params, undefined, undefined, h.ctx);
+
+  await assert.rejects(call("context_peek", { id: "nope" }), /"nope" is not in the archive/);
+  await assert.rejects(call("context_map", { id: "nope" }), /"nope" is not in the archive/);
+  await assert.rejects(call("context_map", { id: "u1" }), /"u1" is a message, not a fold/);
+  await assert.rejects(
+    call("context_summary", { id: "u1", summary: "x" }),
+    /"u1" is not a root: it is inside fold "/,
+  );
+  await assert.rejects(
+    call("context_fold", { items: [{ from: "u1", summary: "x" }] }),
+    /"u1" is not a root: it is inside fold "/,
+  );
+  await assert.rejects(
+    call("context_search", { patterns: ["("] }),
+    /Pattern 1 is not a valid JavaScript regular expression/,
+  );
+  assert.ok(foldId);
 });

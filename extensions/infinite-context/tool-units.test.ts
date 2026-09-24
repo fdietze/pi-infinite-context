@@ -64,6 +64,6 @@ test("ownership validation rejects a unit split across roots", () => {
   );
   assert.throws(
     () => validateToolUnitOwnership(roots, originals),
-    /splits an assistant tool call/,
+    /splits the tool call of "a1"/,
   );
 });

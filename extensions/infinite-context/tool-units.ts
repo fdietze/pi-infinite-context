@@ -1,11 +1,12 @@
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Forest, Item } from "./forest.ts";
 import { originalIds } from "./forest.ts";
 import type { OriginalMessage } from "./originals.ts";
 
 export interface ToolUnits {
-  /** Index of the first original of the tool unit owning each original. */
+  /** Index of the unit's first live member for every live member; every other original maps to itself. */
   readonly start: number[];
-  /** Index of the last original of that unit. */
+  /** Index of the unit's last live member, mirroring `start`. */
   readonly end: number[];
   /**
    * The currently executing turn: the last live assistant of the branch, when
@@ -15,7 +16,7 @@ export interface ToolUnits {
   readonly pendingOwner: number | undefined;
 }
 
-const toolCallIds = (message: OriginalMessage["live"]): string[] => {
+const toolCallIds = (message: AgentMessage | undefined): string[] => {
   if (!message || message.role !== "assistant" || !Array.isArray(message.content)) return [];
   const ids: string[] = [];
   for (const block of message.content)
@@ -26,10 +27,11 @@ const toolCallIds = (message: OriginalMessage["live"]): string[] => {
 /**
  * Group live assistant tool calls with their live results.
  *
- * Only live messages can form a unit: an attempt Pi omitted via `context_edit`
- * never reaches the provider, so it cannot orphan anything. An abandoned call
- * without a result is a complete one-message unit — the provider boundary
- * synthesizes the missing result.
+ * Only live messages are members: an attempt Pi omitted via `context_edit`
+ * never reaches the provider, so it neither orphans nor joins anything even
+ * when it sits between a call and its result. An abandoned call without a
+ * result is a complete one-message unit — the provider boundary synthesizes
+ * the missing result.
  */
 export function toolUnits(originals: readonly OriginalMessage[]): ToolUnits {
   const start = originals.map((_, i) => i);
@@ -43,18 +45,18 @@ export function toolUnits(originals: readonly OriginalMessage[]): ToolUnits {
   let pendingOwner: number | undefined;
   for (let owner = 0; owner < originals.length; ++owner) {
     const live = originals[owner].live;
-    if (!live) continue;
-    if (live.role !== "assistant") continue;
+    if (!live || live.role !== "assistant") continue;
     lastLiveAssistant = owner;
     const calls = toolCallIds(live);
     if (calls.length === 0) continue;
     const results = calls
       .map((id) => resultIndex.get(id))
       .filter((index): index is number => index !== undefined);
-    const last = Math.max(owner, ...results);
-    for (let i = owner; i <= last; ++i) {
-      start[i] = owner;
-      end[i] = last;
+    const members = [owner, ...results];
+    const last = Math.max(...members);
+    for (const member of members) {
+      start[member] = owner;
+      end[member] = last;
     }
     if (results.length !== calls.length) pendingOwner = owner;
   }
@@ -62,6 +64,13 @@ export function toolUnits(originals: readonly OriginalMessage[]): ToolUnits {
   // was abandoned and stays foldable forever.
   if (pendingOwner !== lastLiveAssistant) pendingOwner = undefined;
   return { start, end, pendingOwner };
+}
+
+/** The live members of the unit owned by `owner`, in branch order. */
+export function unitMembers(units: ToolUnits, owner: number): number[] {
+  const members: number[] = [];
+  for (let i = owner; i <= units.end[owner]; ++i) if (units.start[i] === owner) members.push(i);
+  return members;
 }
 
 /** Reject persisted states that would project a tool call without its results. */
@@ -76,16 +85,16 @@ export function validateToolUnitOwnership(
   const units = toolUnits(originals);
   for (let owner = 0; owner < originals.length; ++owner) {
     if (units.start[owner] !== owner || units.end[owner] === owner) continue;
-    const locations = originals
-      .slice(owner, units.end[owner] + 1)
-      .map(({ id }) => rootByOriginal.get(id)!);
+    const locations = unitMembers(units, owner).map(
+      (member) => rootByOriginal.get(originals[member].id)!,
+    );
     const allRoots = locations.every((location) => location.kind === "message");
     const oneFold = locations.every(
       (location) => location.kind === "fold" && location.index === locations[0].index,
     );
     if (!allRoots && !oneFold)
       throw new Error(
-        "Snapshot splits an assistant tool call from its results; start a new session",
+        `Snapshot splits the tool call of "${originals[owner].id}" from its results; start a new session`,
       );
   }
 }

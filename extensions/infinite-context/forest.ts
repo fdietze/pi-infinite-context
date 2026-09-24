@@ -65,7 +65,7 @@ export function wrapRootRanges(
       range.last < range.first ||
       range.last >= roots.length
     )
-      throw new Error("Fold range is outside the visible roots");
+      throw new Error("Fold range is outside the roots");
     if (!range.id || ids.has(range.id)) throw new Error("Fold node id is not unique");
     ids.add(range.id);
     for (let i = range.first; i <= range.last; ++i) {
@@ -97,7 +97,7 @@ export function wrapRootRanges(
 export function replaceRootSummary(roots: Forest, id: string, summary: string): Forest {
   const index = roots.findIndex((item) => item.id === id);
   const item = roots[index];
-  if (!item || item.kind !== "fold") throw new Error("Expected a visible root fold");
+  if (!item || item.kind !== "fold") throw new Error(`"${id}" is not a root fold`);
   return roots.map((candidate, i) =>
     i === index ? { ...item, summary } : candidate,
   );

@@ -25,6 +25,7 @@ import {
   liveTokens,
   visibleTokens,
 } from "./fold-projection.ts";
+import { notAFoldRootError, unknownIdError } from "./id-errors.ts";
 import { branchOriginals, projectedPositions } from "./originals.ts";
 import { ProjectionMismatchError, buildOverlay } from "./overlay.ts";
 import { planRootRanges } from "./plan-root-ranges.ts";
@@ -69,8 +70,9 @@ const PageParams = {
 function directItems(roots: Forest, id?: string): { label: string; items: Forest } {
   if (!id) return { label: "roots", items: roots };
   const item = findItem(roots, id);
-  if (!item) throw new Error("Unknown node id");
-  if (item.kind !== "fold") throw new Error("A message node has no children");
+  if (!item) throw unknownIdError(id);
+  if (item.kind !== "fold")
+    throw new Error(`"${id}" is a message, not a fold: it has no children. Use context_peek to read it.`);
   return { label: `children of ${id}`, items: item.children };
 }
 
@@ -254,7 +256,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
       const state = current(ctx);
       const id = bareId(params.id);
       const item = findItem(state.roots, id);
-      if (!item) throw new Error("Unknown node id");
+      if (!item) throw unknownIdError(id);
       const page = parsePage(params.offset, params.limit);
       const text = item.kind === "fold" ? item.summary : serializeMessage(state.byId.get(item.id)!.message);
       const window = lineWindow(text, page.offset, page.limit);
@@ -284,12 +286,14 @@ export default function infiniteContext(pi: ExtensionAPI) {
     executionMode: "sequential",
     async execute(_callId, params, _signal, _update, ctx) {
       const state = current(ctx);
-      const groups = params.patterns.map((source) => {
+      const groups = params.patterns.map((source, index) => {
         let pattern: RegExp;
         try {
           pattern = compilePattern(source);
         } catch {
-          throw new Error("Invalid search pattern: malformed JavaScript regular expression");
+          throw new Error(
+            `Pattern ${index + 1} is not a valid JavaScript regular expression: /${previewText(source)}/`,
+          );
         }
         return { source, result: searchArchive(state.originals, state.roots, pattern) };
       });
@@ -381,6 +385,8 @@ export default function infiniteContext(pi: ExtensionAPI) {
     async execute(_callId, params, _signal, _update, ctx) {
       const state = current(ctx);
       const id = bareId(params.id);
+      if (!state.roots.some((root) => root.kind === "fold" && root.id === id))
+        throw notAFoldRootError(state.roots, id);
       const before = visibleTokens(state.roots, state.byId);
       const next = replaceRootSummary(state.roots, id, params.summary);
       const after = visibleTokens(next, state.byId);

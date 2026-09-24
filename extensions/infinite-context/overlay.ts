@@ -30,7 +30,9 @@ export function buildOverlay(
   for (let i = 0; i < positions.length; ++i)
     if (positions[i].message !== messages[i] && !isDeepStrictEqual(positions[i].message, messages[i]))
       throw new ProjectionMismatchError(
-        `The request stops matching the session projection at position ${i} (${messages[i]?.role ?? "missing"})`,
+        `The request stops matching the session projection at position ${i}: ` +
+          `expected entry "${positions[i].id}" (${positions[i].message.role}), ` +
+          `received ${messages[i]?.role ?? "nothing"}`,
       );
 
   const byId: OriginalsById = new Map(
