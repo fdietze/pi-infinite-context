@@ -19,15 +19,12 @@ import {
   syncOriginals,
   wrapRootRanges,
 } from "./forest.ts";
-import {
-  type OriginalMessage,
-  branchOriginals,
-  buildOverlay,
-  estimateContextTokens,
-  planRootRanges,
-  serializeMessage,
-  validateToolUnitOwnership,
-} from "./messages.ts";
+import { estimateContextTokens } from "./estimate-context-tokens.ts";
+import { type OriginalMessage, branchOriginals } from "./originals.ts";
+import { buildOverlay } from "./overlay.ts";
+import { planRootRanges } from "./plan-root-ranges.ts";
+import { serializeMessage } from "./serialize-message.ts";
+import { validateToolUnitOwnership } from "./tool-units.ts";
 import { planNudge } from "./nudge.ts";
 import {
   DEFAULT_PAGE_LIMIT,

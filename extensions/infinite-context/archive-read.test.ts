@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { messageItem, wrapRootRanges } from "./forest.ts";
-import type { OriginalMessage } from "./messages.ts";
+import type { OriginalMessage } from "./originals.ts";
 import { boundOutput, lineWindow, MAX_OUTPUT_BYTES, parsePage } from "./output.ts";
 import { assistantMessage, userMessage } from "./pi-test-fixtures.ts";
 import { compilePattern, searchArchive } from "./search.ts";

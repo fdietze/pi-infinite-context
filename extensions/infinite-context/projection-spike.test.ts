@@ -4,7 +4,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { messageItem } from "./forest.ts";
-import { branchOriginals, planRootRanges } from "./messages.ts";
+import { branchOriginals } from "./originals.ts";
+import { planRootRanges } from "./plan-root-ranges.ts";
 import { assistantMessage, toolResultMessage, userMessage } from "./pi-test-fixtures.ts";
 
 const call = (id: string) => ({ type: "toolCall" as const, id, name: "question", arguments: {} });

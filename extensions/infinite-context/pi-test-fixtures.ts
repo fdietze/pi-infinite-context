@@ -78,3 +78,23 @@ export const messageEntry = (id: string, message: AgentMessage): SessionEntry =>
   timestamp: new Date(message.timestamp).toISOString(),
   message,
 });
+
+export const original = (id: string, message: AgentMessage) => ({ id, message });
+
+/** One user turn, two parallel calls with both results, then a plain reply. */
+export const completedTools = () => [
+  original("u0", userMessage("read both", 1)),
+  original(
+    "a1",
+    assistantMessage(
+      [
+        { type: "toolCall", id: "c1", name: "read", arguments: { path: "a" } },
+        { type: "toolCall", id: "c2", name: "read", arguments: { path: "b" } },
+      ],
+      2,
+    ),
+  ),
+  original("r2", toolResultMessage("c1", "A", 3)),
+  original("r3", toolResultMessage("c2", "B", 4)),
+  original("a4", assistantMessage([{ type: "text", text: "done" }], 5)),
+];

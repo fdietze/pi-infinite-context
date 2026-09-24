@@ -1,7 +1,7 @@
 import type { Forest } from "./forest.ts";
 import { allItems } from "./forest.ts";
-import type { OriginalMessage } from "./messages.ts";
-import { serializeMessage } from "./messages.ts";
+import type { OriginalMessage } from "./originals.ts";
+import { serializeMessage } from "./serialize-message.ts";
 
 export const SEARCH_MATCHES_PER_ITEM = 5;
 export const SEARCH_MATCHES_PER_PATTERN = 50;
