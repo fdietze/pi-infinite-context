@@ -171,12 +171,29 @@ function pendingRoots(
   };
 }
 
+/**
+ * The request after another extension's `context` handler ran first and
+ * inserted a synthetic result after every call that lacks one.
+ */
+function repairAbandonedCalls(request: readonly AgentMessage[]): AgentMessage[] {
+  const answered = new Set(resultIdsOf(request));
+  return request.flatMap((message) => [
+    message,
+    ...callIdsOf(message)
+      .filter((id) => !answered.has(id))
+      .map((id) => toolResultMessage(id, "(no result)", message.timestamp)),
+  ]);
+}
+
 function assertInvariants(roots: Forest, state: State) {
   // P4: leaves are exactly the raw originals, in branch order.
   assert.deepEqual(originalIds(roots), state.originals.map(({ id }) => id));
   validateToolUnitOwnership(roots, state.originals);
-  const output = buildOverlay(state.request, state.positions, state.originals, roots);
-  assertProviderValid(state.request, output);
+  for (const request of [state.request, repairAbandonedCalls(state.request)])
+    assertProviderValid(
+      request,
+      buildOverlay(request, state.positions, state.originals, roots),
+    );
 
   // P3: every contiguous range clear of the pending unit is foldable.
   const pending = pendingRoots(roots, state.originals);
@@ -226,6 +243,11 @@ test("folding a real session keeps the archive and the request consistent", () =
         assert.deepEqual(
           buildOverlay(state.request, state.positions, state.originals, roots),
           state.request,
+        );
+        const repaired = repairAbandonedCalls(state.request);
+        assert.deepEqual(
+          buildOverlay(repaired, state.positions, state.originals, roots),
+          repaired,
         );
         assertInvariants(roots, state);
 

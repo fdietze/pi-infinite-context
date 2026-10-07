@@ -5,17 +5,28 @@ import { originalIds } from "./forest.ts";
 import { anchorId, foldSummaryText, type OriginalsById } from "./fold-projection.ts";
 import type { OriginalMessage, ProjectedPosition } from "./originals.ts";
 
-/** Raised when the request no longer starts with the session projection, so no position can be trusted. */
+/** Raised when some projected entry is missing from the request, so the position mapping cannot be trusted. */
 export class ProjectionMismatchError extends Error {}
+
+const matches = (position: ProjectedPosition, message: AgentMessage) =>
+  position.message === message || isDeepStrictEqual(position.message, message);
 
 /**
  * Overlay the request copy; the raw session branch is never rewritten.
  *
- * Pi builds the request from the session projection and appends anything not yet
- * persisted, so the projection is a prefix of `messages` and gives every prefix
- * position its owning entry id. Each fold emits one synthetic user message at
- * its anchor, its other members are dropped, and everything else passes through
- * unchanged.
+ * Pi builds the request from the session projection and appends anything not
+ * yet persisted. Other extensions' `context` handlers may run before this one
+ * and insert messages (e.g. synthetic results for an abandoned tool call), and
+ * Pi does not let us order handlers. So the projection must appear in the
+ * request as an ordered subsequence, matched greedily by identity or deep
+ * equality; that gives every matched request message its owning entry id.
+ *
+ * Each fold emits one synthetic user message at its anchor and drops its other
+ * members. An unmatched message before the last projected position is a foreign
+ * insertion owned by the root of the nearest preceding projected position: a
+ * fold drops it as part of the folded unit (a result of a folded call must not
+ * outlive its call), anything else passes it through. Messages before the first
+ * and after the last projected position pass through unchanged.
  */
 export function buildOverlay(
   messages: readonly AgentMessage[],
@@ -23,19 +34,6 @@ export function buildOverlay(
   originals: readonly OriginalMessage[],
   roots: Forest,
 ): AgentMessage[] {
-  if (positions.length > messages.length)
-    throw new ProjectionMismatchError(
-      `The request ends after ${messages.length} messages, before projected entry ` +
-        `"${positions[messages.length].id}" (${positions[messages.length].message.role})`,
-    );
-  for (let i = 0; i < positions.length; ++i)
-    if (positions[i].message !== messages[i] && !isDeepStrictEqual(positions[i].message, messages[i]))
-      throw new ProjectionMismatchError(
-        `The request stops matching the session projection at position ${i}: ` +
-          `expected entry "${positions[i].id}" (${positions[i].message.role}), ` +
-          `received ${messages[i]?.role ?? "nothing"}`,
-      );
-
   const byId: OriginalsById = new Map(
     originals.map((original) => [original.id, original] as const),
   );
@@ -47,18 +45,29 @@ export function buildOverlay(
   }
 
   const output: AgentMessage[] = [];
+  let next = 0; // next projected position to match
+  let matchedUpTo = 0; // request length up to and including the last matched message
+  let owner: Item | undefined; // root of the last matched projected position
   for (let i = 0; i < messages.length; ++i) {
-    const root = i < positions.length ? rootByOriginal.get(positions[i].id) : undefined;
-    if (!root || root.kind === "message") {
-      output.push(messages[i]);
+    const message = messages[i];
+    if (next < positions.length && matches(positions[next], message)) {
+      const { id } = positions[next++];
+      matchedUpTo = i + 1;
+      owner = rootByOriginal.get(id);
+      if (!owner || owner.kind === "message") output.push(message);
+      else if (anchors.get(owner) === id)
+        output.push({ role: "user", content: foldSummaryText(owner), timestamp: message.timestamp });
       continue;
     }
-    if (anchors.get(root) !== positions[i].id) continue;
-    output.push({
-      role: "user",
-      content: foldSummaryText(root),
-      timestamp: messages[i].timestamp,
-    });
+    // Foreign insertion inside the projection, or the unpersisted tail.
+    if (next < positions.length && owner?.kind === "fold") continue;
+    output.push(message);
   }
+  if (next < positions.length)
+    throw new ProjectionMismatchError(
+      `Projected entry "${positions[next].id}" (${positions[next].message.role}) is missing ` +
+        `from the request at or after position ${matchedUpTo}: another context handler ` +
+        `removed or changed it`,
+    );
   return output;
 }

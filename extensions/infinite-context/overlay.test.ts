@@ -11,6 +11,7 @@ import {
   omittedOriginal,
   original,
   positionsOf,
+  toolResultMessage,
   userMessage,
 } from "./pi-test-fixtures.ts";
 
@@ -90,16 +91,73 @@ test("messages appended after the projection pass through unchanged", () => {
   assert.equal(output.length, request.length);
 });
 
-test("a request that does not start with the projection is refused", () => {
-  const originals = completedTools();
+/** A branch whose call c1 was abandoned, as left behind by quitting while a tool call was pending. */
+const abandonedCall = () => [
+  original("u0", userMessage("ask me", 1)),
+  original(
+    "a1",
+    assistantMessage([{ type: "toolCall", id: "c1", name: "question", arguments: {} }], 2),
+  ),
+  original("u2", userMessage("never mind", 3)),
+  original("a3", assistantMessage([{ type: "text", text: "ok" }], 4)),
+];
+
+/** What another extension's `context` handler inserts to repair the abandoned call. */
+const syntheticResult = toolResultMessage("c1", "No answer.", 2);
+
+test("a message inserted after a live position passes through in place", () => {
+  const originals = abandonedCall();
+  const request = live(originals);
+  request.splice(2, 0, syntheticResult);
+  const output = buildOverlay(
+    request,
+    positionsOf(originals),
+    originals,
+    originals.map(({ id }) => messageItem(id)),
+  );
+  assert.deepEqual(output, request);
+});
+
+test("a message inserted after a folded position is dropped with the fold", () => {
+  const originals = abandonedCall();
+  const roots = wrapRootRanges(originals.map(({ id }) => messageItem(id)), [
+    { first: 1, last: 2, id: "fold-q", summary: "asked, then dropped it" },
+  ]);
+  const request = live(originals);
+  request.splice(2, 0, syntheticResult);
+  const output = buildOverlay(request, positionsOf(originals), originals, roots);
+  assert.equal(output.length, 3);
+  assert.equal(output[0], request[0]);
+  assert.equal(output[1].role === "user" && output[1].content, "[#fold-q] archived fold summary:\nasked, then dropped it");
+  assert.equal(output[2], request[4]);
+});
+
+test("a message inserted before the first position passes through", () => {
+  const originals = abandonedCall();
+  const roots = wrapRootRanges(originals.map(({ id }) => messageItem(id)), [
+    { first: 0, last: 1, id: "fold-head", summary: "head" },
+  ]);
+  const preamble = customMessage("other", "preamble", 0);
+  const request = [preamble, ...live(originals)];
+  const output = buildOverlay(request, positionsOf(originals), originals, roots);
+  assert.equal(output[0], preamble);
+  assert.equal(output[1].role === "user" && output[1].content, "[#fold-head] archived fold summary:\nhead");
+  assert.deepEqual(output.slice(2), request.slice(3));
+});
+
+test("a request missing a projected entry is refused", () => {
+  const originals = abandonedCall();
+  const positions = positionsOf(originals);
   const request = live(originals);
   assert.throws(
-    () => buildOverlay(request.slice(1), positionsOf(originals), originals, []),
-    ProjectionMismatchError,
+    () => buildOverlay([...request.slice(0, 2), ...request.slice(3)], positions, originals, []),
+    /Projected entry "u2" \(user\) is missing from the request at or after position 2/,
   );
+  const changed = [...request.slice(0, 2), userMessage("rewritten", 3), request[3]];
+  assert.throws(() => buildOverlay(changed, positions, originals, []), ProjectionMismatchError);
   assert.throws(
-    () => buildOverlay([userMessage("other", 1)], positionsOf(originals).slice(0, 1), originals, []),
-    /stops matching the session projection at position 0/,
+    () => buildOverlay(request.slice(0, 3), positions, originals, []),
+    /Projected entry "a3"/,
   );
 });
 
