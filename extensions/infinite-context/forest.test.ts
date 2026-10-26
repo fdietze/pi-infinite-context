@@ -93,11 +93,38 @@ test("sync appends only a current-branch suffix and rejects branch mismatch", ()
   assert.throws(() => syncOriginals(roots, ["m0", "other"]), /current branch/);
   assert.throws(
     () => syncOriginals(roots, ["m0"]),
-    /message m1 at position 1, but the current branch has only 1 messages/,
+    /Snapshot lists message m1, which is missing from the current branch/,
   );
   assert.throws(
     () => syncOriginals([messageItem("m0"), messageItem("m0")], ["m0", "m0"]),
     /lists message m0 twice/,
+  );
+  assert.throws(
+    () => syncOriginals([messageItem("m0"), messageItem("m1")], ["m1", "m0"]),
+    /Snapshot lists message m1 after m0, but the current branch has them in the other order/,
+  );
+});
+
+// Shape of a real session: after the snapshot, a crash recovery wrote a tool result (r) into the
+// history between its call (c) and the next user message (u2).
+test("sync places originals inserted between roots at their branch position and keeps the roots", () => {
+  const saved = wrapRootRanges(["u1", "a1", "r1", "c", "u2"].map(messageItem), [
+    { first: 0, last: 2, id: "f", summary: "early work" },
+  ]);
+  const synced = syncOriginals(saved, ["x", "u1", "a1", "r1", "c", "r", "y", "u2", "z"]);
+  assert.deepEqual(synced.map((root) => root.id), ["x", "f", "c", "r", "y", "u2", "z"]);
+  assert.equal(synced[1], saved[0]);
+  assert.deepEqual(originalIds(synced), ["x", "u1", "a1", "r1", "c", "r", "y", "u2", "z"]);
+  assert.deepEqual(syncOriginals([], ["a", "b"]).map((root) => root.id), ["a", "b"]);
+});
+
+test("sync rejects an original inserted inside a root's range: branch order could not hold", () => {
+  const saved = wrapRootRanges(["u1", "a1", "r1"].map(messageItem), [
+    { first: 0, last: 2, id: "f", summary: "early work" },
+  ]);
+  assert.throws(
+    () => syncOriginals(saved, ["u1", "new", "a1", "r1"]),
+    /The current branch has message new inside root f, which the snapshot does not list/,
   );
 });
 

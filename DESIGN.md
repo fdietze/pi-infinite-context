@@ -19,7 +19,7 @@ type Item =
 type Snapshot = { version: 2; roots: Item[] };
 ```
 
-Original text stays in Pi's session; a leaf stores only its entry ID. The last snapshot on the current branch supplies the forest; later originals append as roots.
+Original text stays in Pi's session; a leaf stores only its entry ID. The last snapshot on the current branch supplies the forest; originals it does not list become roots at their branch position, and one inside a root's range makes the branch unloadable.
 
 ## Algebra
 

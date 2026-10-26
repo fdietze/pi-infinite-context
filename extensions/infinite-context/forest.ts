@@ -93,7 +93,13 @@ export function wrapRootRanges(
   return result;
 }
 
-/** Append new branch messages while proving every archived original still exists once and in order. */
+/**
+ * Re-sync the snapshot with the branch while proving every archived original still exists once
+ * and in order. Originals the snapshot does not list become message roots at their branch
+ * position: appended ones, and ones Pi wrote between two roots after the snapshot (e.g. a tool
+ * result recovered into the history). One inside a root's range cannot be placed without
+ * breaking branch order (invariant 1), so it is rejected.
+ */
 export function syncOriginals(roots: Forest, currentOriginalIds: readonly string[]): Forest {
   const archived = originalIds(roots);
   const seen = new Set<string>();
@@ -101,20 +107,40 @@ export function syncOriginals(roots: Forest, currentOriginalIds: readonly string
     if (seen.has(id)) throw new Error(`Snapshot lists message ${id} twice`);
     seen.add(id);
   }
-  // One positional walk names the first divergence, whether the branch is shorter or different.
-  for (let i = 0; i < archived.length; ++i) {
-    if (archived[i] !== currentOriginalIds[i])
+  const position = new Map(currentOriginalIds.map((id, i) => [id, i] as const));
+  let previous: string | undefined;
+  for (const id of archived) {
+    const at = position.get(id);
+    if (at === undefined)
+      throw new Error(`Snapshot lists message ${id}, which is missing from the current branch`);
+    if (previous !== undefined && at < position.get(previous)!)
       throw new Error(
-        `Snapshot lists message ${archived[i]} at position ${i}, but the current branch has ` +
-          (i < currentOriginalIds.length
-            ? `${currentOriginalIds[i]} there`
-            : `only ${currentOriginalIds.length} messages`),
+        `Snapshot lists message ${id} after ${previous}, but the current branch has them in the other order`,
       );
+    previous = id;
   }
-  return [
-    ...roots,
-    ...currentOriginalIds.slice(archived.length).map(messageItem),
-  ];
+  const result: Item[] = [];
+  let next = 0;
+  for (const root of roots) {
+    const leaves = originalIds([root]);
+    if (leaves.length === 0) {
+      result.push(root);
+      continue;
+    }
+    const first = position.get(leaves[0])!;
+    const last = position.get(leaves.at(-1)!)!;
+    while (next < first) result.push(messageItem(currentOriginalIds[next++]));
+    if (last - first + 1 !== leaves.length) {
+      const inside = currentOriginalIds.slice(first, last + 1).find((id) => !seen.has(id));
+      throw new Error(
+        `The current branch has message ${inside} inside root ${root.id}, which the snapshot does not list`,
+      );
+    }
+    result.push(root);
+    next = last + 1;
+  }
+  while (next < currentOriginalIds.length) result.push(messageItem(currentOriginalIds[next++]));
+  return result;
 }
 
 interface MutableFold {
