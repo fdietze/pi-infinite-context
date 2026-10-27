@@ -24,16 +24,18 @@ import { unknownIdError } from "./id-errors.ts";
 import { assertSupportedBranch } from "./assert-supported-branch.ts";
 import { branchOriginals, projectedPositions } from "./originals.ts";
 import { ProjectionMismatchError, buildOverlay } from "./overlay.ts";
+import { applyFoldTiming, foldHint } from "./fold-hint.ts";
 import { planRootRanges } from "./plan-root-ranges.ts";
 import { serializeMessage } from "./serialize-message.ts";
 import { validateToolUnitOwnership } from "./tool-units.ts";
-import { nudgeSchedule, planNudge } from "./nudge.ts";
+import { nudgeSchedule, planNudge, reminderText } from "./nudge.ts";
 import {
   DEFAULT_SETTINGS,
   type FileSettings,
   SETTINGS_ENTRY,
   type Settings,
   parseSettings,
+  resolvePrice,
   resolveSettings,
   settingsChanged,
 } from "./settings.ts";
@@ -106,6 +108,8 @@ export default function infiniteContext(pi: ExtensionAPI) {
   let roots: Forest = [];
   let stateError: Error | undefined;
   let loaded = false;
+  // Time of the last successful provider response: the prompt cache dates from it.
+  let lastRequestAt: number | undefined;
   // Branch state: one Pi process can switch sessions (/new, /resume, /tree), so load() sets
   // both for the branch it loads; nothing leaks from the previous branch's reminder arm.
   let settings: Settings = DEFAULT_SETTINGS;
@@ -175,8 +179,22 @@ export default function infiniteContext(pi: ExtensionAPI) {
     pi.appendEntry(INFINITE_CONTEXT_ENTRY, snapshot(roots));
   };
 
-  pi.on("session_start", async (_event, ctx) => load(ctx));
+  pi.on("session_start", async (_event, ctx) => {
+    lastRequestAt = undefined;
+    load(ctx);
+  });
   pi.on("session_tree", async (_event, ctx) => load(ctx));
+
+  // A prompt section rather than a returned systemPrompt, which would replace the whole prompt.
+  pi.on("before_agent_start", async (event, ctx) => {
+    if (!loaded) load(ctx);
+    const sections = event.systemPromptOptions?.sections;
+    if (sections) applyFoldTiming(sections, settings.foldHint);
+  });
+
+  pi.on("after_provider_response", async (event) => {
+    if (event.status >= 200 && event.status < 300) lastRequestAt = Date.now();
+  });
 
   pi.on("context", async (event, ctx) => {
     if (stateError) return;
@@ -212,22 +230,30 @@ export default function infiniteContext(pi: ExtensionAPI) {
     const window = usage?.contextWindow ?? 0;
     const tokens = usage?.tokens ?? null;
     if (window <= 0 || tokens == null) return;
-    const percent = (tokens / window) * 100;
     const message = event.message as { stopReason?: string };
     const continuing = message.stopReason === "toolUse" && event.toolResults.length > 0;
-    const planned = planNudge(tokens, window, settings, lastNudgedBand, continuing);
+    const planned = planNudge(tokens, window, settings, lastNudgedBand, continuing, ctx.model);
     lastNudgedBand = planned.band;
     if (!planned.nudge) return;
+    const schedule = nudgeSchedule(window, settings, ctx.model);
+    const hint = foldHint({
+      tokens,
+      price: resolvePrice(settings, ctx.model),
+      lastRequestAt,
+      now: Date.now(),
+      ttlMs: settings.cacheTtlMinutes * 60_000,
+      mode: settings.foldHint,
+    });
     pi.sendMessage(
       {
         customType: "infinite-context/nudge",
         content:
-          `<context-maintenance>\nContext is ~${Math.round(percent)}% full. ` +
+          `<context-maintenance>\n${reminderText(tokens, window, schedule, hint)} ` +
           "Use context_map, then context_fold completed or superseded roots in one call that frees at least ~15k tokens. " +
           "Keep the active request, open loops, unresolved errors, and evidence needed soon. " +
           "Native compaction is blocked, so an actual overflow will remain visible.\n</context-maintenance>",
         display: true,
-        details: { band: planned.band, tokens, window, ...nudgeSchedule(window, settings) },
+        details: { band: planned.band, tokens, window, ...schedule },
       },
       { deliverAs: "steer" },
     );

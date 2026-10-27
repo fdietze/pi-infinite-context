@@ -39,7 +39,25 @@ Optional file `~/.pi/agent/infinite-context/settings.json` (inside Pi's configur
 
 `nudgeAtTokens` can also be a range, `[100000, 300000]`, to measure how the limit affects cost: each session then draws one limit uniformly from the range and keeps it when resumed, reloaded or forked. A changed range draws anew.
 
-The session records the effective limits as a `custom` entry of type `infinite-context:settings` whenever they change (with `nudgeAtTokensRange` when the limit was drawn), and each reminder carries its token count, window, threshold and step in `details`.
+`reminders` sets the start (`startTokens`) and the distance (`everyTokens`) per provider or model, for example a later start on a model with a large window:
+
+```json
+{
+  "reminders": {
+    "default": { "everyTokens": 20000 },
+    "overrides": {
+      "anthropic": { "startTokens": 200000 },
+      "anthropic/claude-opus-4-5": { "startTokens": 300000, "everyTokens": 50000 }
+    }
+  }
+}
+```
+
+Each field resolves on its own: the exact `provider/modelId` entry, then the provider entry, then `default`, then `nudgeAtTokens` (start, including a drawn one) or 15k (distance). The start is still capped at `nudgeAtPercent` of the window, and the distance still shrinks when little room remains. A rule's `startTokens` therefore overrides a drawn `nudgeAtTokens` for that model: the draw is disabled there, and the recorded `nudgeAtTokens` is not the start the reminders use (`details.threshold` and the recorded `reminders` are).
+
+With `"foldHint": "cache-aware"` (default `"fixed"`: off), reminders also say what folding costs now (see [Prefix caching](#prefix-caching)), and the system prompt gets a short `fold_timing` section on when to fold. While the prompt cache is warm, a reminder names the turns after which folding the oldest 75% of the context pays off, and the general rule behind it; once no request succeeded for `cacheTtlMinutes` (default 5), it says folding is free now. Cache prices come from the model's cost in Pi's model registry; `prices` overrides them per exact `provider/modelId` or provider, e.g. `{ "anthropic": { "cacheWrite": 3.75, "cacheRead": 0.3 } }` (any unit; only the ratio matters).
+
+The session records the effective limits as a `custom` entry of type `infinite-context:settings` whenever they change (with `nudgeAtTokensRange` when the limit was drawn, `reminders` and `prices` when set), and each reminder carries its token count, window, threshold and step in `details`.
 
 The agent chooses what to fold and writes the summaries. Reminders do not fold anything themselves.
 

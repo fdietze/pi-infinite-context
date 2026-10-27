@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import fc from "fast-check";
-import { NUDGES_BEFORE_OVERFLOW, nudgeSchedule, planNudge } from "./nudge.ts";
+import { NUDGES_BEFORE_OVERFLOW, nudgeSchedule, planNudge, reminderText } from "./nudge.ts";
 import { DEFAULT_SETTINGS, type Settings } from "./settings.ts";
 
 const settings = (nudgeAtTokens: number, nudgeAtPercent: number): Settings => ({
+  ...DEFAULT_SETTINGS,
   nudgeAtTokens,
   nudgeAtPercent,
 });
@@ -126,4 +127,99 @@ test("property: at least NUDGES_BEFORE_OVERFLOW reminders fit between threshold 
       },
     ),
   );
+});
+
+const MILLION = 1_000_000;
+const opus = { provider: "anthropic", id: "claude-opus" };
+const withRules = (reminders: Settings["reminders"]): Settings => ({ ...DEFAULT_SETTINGS, reminders });
+const configured = withRules({
+  default: {},
+  overrides: {
+    anthropic: { startTokens: 300_000, everyTokens: 50_000 },
+    "anthropic/claude-opus": { startTokens: 400_000 },
+  },
+});
+
+test("rule fields resolve on their own: exact provider/model, then provider, then default, then the limits", () => {
+  assert.deepEqual(nudgeSchedule(MILLION, configured, opus), { threshold: 400_000, step: 50_000 });
+  assert.deepEqual(nudgeSchedule(MILLION, configured, { provider: "anthropic", id: "claude-haiku" }), {
+    threshold: 300_000,
+    step: 50_000,
+  });
+  assert.deepEqual(nudgeSchedule(MILLION, configured, { provider: "openai", id: "gpt" }), {
+    threshold: 150_000,
+    step: 15_000,
+  });
+  assert.deepEqual(nudgeSchedule(MILLION, configured), { threshold: 150_000, step: 15_000 });
+  const fallback = withRules({ default: { everyTokens: 30_000 }, overrides: { openai: { startTokens: 200_000 } } });
+  assert.deepEqual(nudgeSchedule(MILLION, fallback, { provider: "openai", id: "gpt" }), {
+    threshold: 200_000,
+    step: 30_000,
+  });
+  assert.deepEqual(nudgeSchedule(MILLION, fallback, opus), { threshold: 150_000, step: 30_000 });
+});
+
+test("a rule's start replaces nudgeAtTokens, also a drawn one", () => {
+  const drawn: Settings = { ...configured, nudgeAtTokens: 120_000, nudgeAtTokensRange: [100_000, 200_000] };
+  assert.equal(nudgeSchedule(MILLION, drawn, opus).threshold, 400_000);
+  assert.equal(nudgeSchedule(MILLION, drawn, { provider: "openai", id: "gpt" }).threshold, 120_000);
+});
+
+test("a rule keeps the safety limits: start at most nudgeAtPercent, room for the last reminders", () => {
+  // 75% of 200k is 150k, below the rule's 400k start; 50k room / 3 is below the rule's 50k step.
+  assert.deepEqual(nudgeSchedule(200_000, configured, opus), { threshold: 150_000, step: 50_000 / 3 });
+});
+
+test("the model decides: the same context reminds on one model and not on another", () => {
+  const rule = withRules({ default: {}, overrides: { anthropic: { startTokens: 100_000 } } });
+  assert.equal(planNudge(120_000, MILLION, rule, 0, true, opus).nudge, true);
+  assert.equal(planNudge(120_000, MILLION, rule, 0, true, { provider: "openai", id: "gpt" }).nudge, false);
+});
+
+test("property: with per-model rules, reminders never fire below the start and enough fit before overflow", () => {
+  const rule = fc.record(
+    { startTokens: fc.integer({ min: 1, max: 3_000_000 }), everyTokens: fc.integer({ min: 1, max: 500_000 }) },
+    { requiredKeys: [] },
+  );
+  fc.assert(
+    fc.property(
+      fc.integer({ min: 64, max: 2_000 }), // window in k tokens
+      rule,
+      rule,
+      fc.constantFrom(opus, { provider: "anthropic", id: "other" }, { provider: "openai", id: "gpt" }, undefined),
+      (windowK, provider, exact, model) => {
+        const window = windowK * 1_000;
+        const s = withRules({ default: {}, overrides: { anthropic: provider, "anthropic/claude-opus": exact } });
+        const { threshold } = nudgeSchedule(window, s, model);
+        assert.ok(threshold <= window * 0.75);
+        let band = 0;
+        let count = 0;
+        for (let tokens = 0; tokens < window; tokens += 1_000) {
+          const planned = planNudge(tokens, window, s, band, true, model);
+          if (tokens < threshold) assert.equal(planned.nudge, false);
+          if (planned.nudge) {
+            assert.ok(planned.band > band);
+            count++;
+          }
+          band = planned.band;
+        }
+        if (window - threshold >= NUDGES_BEFORE_OVERFLOW * 1_000) assert.ok(count >= NUDGES_BEFORE_OVERFLOW);
+      },
+    ),
+    { numRuns: 200 },
+  );
+});
+
+test("the reminder states absolute tokens, the window share and the schedule it follows", () => {
+  assert.equal(
+    reminderText(152_400, MILLION, { threshold: 150_000, step: 20_000 }),
+    "Context is ~152k tokens (15% of the 1000k-token window). Reminders start at 150k tokens and repeat every 20k.",
+  );
+});
+
+test("a step below 1k tokens is stated exactly, not rounded to 0k", () => {
+  const text = reminderText(99_000, MILLION, { threshold: 98_000, step: 1 });
+  assert.match(text, /Reminders start at 98k tokens and repeat every 1 token\./);
+  assert.match(reminderText(99_000, MILLION, { threshold: 98_000, step: 420.4 }), /repeat every 420 tokens\./);
+  assert.match(reminderText(99_000, MILLION, { threshold: 98_000, step: 8_000 / 3 }), /repeat every 3k\./);
 });

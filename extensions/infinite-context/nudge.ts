@@ -1,4 +1,4 @@
-import type { Settings } from "./settings.ts";
+import { type ModelRef, type ReminderRule, type Settings, modelEntries } from "./settings.ts";
 
 /**
  * Upper bound for the distance between two reminders. It exceeds the context growth of one
@@ -12,19 +12,29 @@ export const NUDGE_STEP_TOKENS = 15_000;
 export const NUDGES_BEFORE_OVERFLOW = 3;
 
 /**
- * Where reminders start and how far apart they are for one window size.
- * The threshold is the earlier of the two limits (Margin of Safety): the token limit catches
- * degraded quality on large windows, the percentage catches overflow on small ones.
+ * Where reminders start and how far apart they are for one window size and model.
+ * A per-model rule (settings `reminders`) sets the start and the step field by field: the exact
+ * "provider/modelId" rule, then the provider's, then `reminders.default`; a field no rule sets
+ * falls back to `nudgeAtTokens` (start) or NUDGE_STEP_TOKENS (step).
+ * The threshold is the earlier of that start and the window share (Margin of Safety): the token
+ * limit catches degraded quality on large windows, the percentage catches overflow on small ones.
  * The step shrinks when little room remains, so at least NUDGES_BEFORE_OVERFLOW reminders fit
  * before the window ends; native compaction is blocked, so there is no net below them.
  */
 export function nudgeSchedule(
   window: number,
   settings: Settings,
+  model?: ModelRef,
 ): { threshold: number; step: number } {
-  const threshold = Math.min(settings.nudgeAtTokens, (settings.nudgeAtPercent / 100) * window);
+  const rules = settings.reminders
+    ? [...modelEntries(settings.reminders.overrides, model), settings.reminders.default]
+    : [];
+  const pick = (key: keyof ReminderRule) => rules.find((rule) => rule[key] !== undefined)?.[key];
+  const start = pick("startTokens") ?? settings.nudgeAtTokens;
+  const threshold = Math.min(start, (settings.nudgeAtPercent / 100) * window);
+  const every = pick("everyTokens") ?? NUDGE_STEP_TOKENS;
   // max(1, …) keeps the step positive when the threshold equals the window (100%).
-  const step = Math.max(1, Math.min(NUDGE_STEP_TOKENS, (window - threshold) / NUDGES_BEFORE_OVERFLOW));
+  const step = Math.max(1, Math.min(every, (window - threshold) / NUDGES_BEFORE_OVERFLOW));
   return { threshold, step };
 }
 
@@ -39,11 +49,38 @@ export function planNudge(
   settings: Settings,
   lastBand: number,
   continuing: boolean,
+  model?: ModelRef,
 ): { nudge: boolean; band: number } {
   if (!Number.isFinite(tokens) || !(window > 0)) return { nudge: false, band: 0 };
-  const { threshold, step } = nudgeSchedule(window, settings);
+  const { threshold, step } = nudgeSchedule(window, settings, model);
   if (tokens < threshold) return { nudge: false, band: 0 };
   const band = threshold + step * Math.floor((tokens - threshold) / step);
   if (continuing && band > lastBand) return { nudge: true, band };
   return { nudge: false, band: lastBand };
+}
+
+const k = (tokens: number) => `${Math.round(tokens / 1000)}k`;
+// Below 1k a rounded "0k" would be misleading (nudgeAtPercent 100 gives a step of 1).
+const exact = (tokens: number) => {
+  const n = Math.max(1, Math.round(tokens));
+  return tokens < 1000 ? `${n} token${n === 1 ? "" : "s"}` : k(tokens);
+};
+
+/**
+ * The reminder's opening sentences: absolute tokens next to the window share, and the schedule
+ * they follow. With per-model rules the share alone does not tell the agent how close it is.
+ * The fold hint (fold-hint.ts) follows when there is one.
+ */
+export function reminderText(
+  tokens: number,
+  window: number,
+  schedule: { threshold: number; step: number },
+  hint?: string,
+): string {
+  const percent = Math.round((tokens / window) * 100);
+  return (
+    `Context is ~${k(tokens)} tokens (${percent}% of the ${k(window)}-token window). ` +
+    `Reminders start at ${k(schedule.threshold)} tokens and repeat every ${exact(schedule.step)}.` +
+    (hint ? ` ${hint}` : "")
+  );
 }

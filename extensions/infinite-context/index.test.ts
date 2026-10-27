@@ -53,6 +53,7 @@ function harness(initial: SessionEntry[]) {
   const handlers = new Map<string, Handler[]>();
   const tools = new Map<string, RegisteredTool>();
   const notifications: string[] = [];
+  const sent: Array<{ content?: unknown; details?: unknown }> = [];
   let appended = 0;
   const pi = {
     on(name: string, handler: Handler) {
@@ -73,7 +74,9 @@ function harness(initial: SessionEntry[]) {
         data,
       });
     },
-    sendMessage() {},
+    sendMessage(message: { content?: unknown; details?: unknown }) {
+      sent.push(message);
+    },
   } as unknown as ExtensionAPI;
   const ctx = {
     sessionManager: {
@@ -87,6 +90,7 @@ function harness(initial: SessionEntry[]) {
   return {
     tools,
     notifications,
+    sent,
     ctx,
     entries: () => entries,
     setEntries(next: SessionEntry[]) {
@@ -124,6 +128,8 @@ test("each branch records the effective settings once, again after switching to 
   assert.deepEqual(recorded.type === "custom" && recorded.data, {
     nudgeAtTokens: 150_000,
     nudgeAtPercent: 75,
+    cacheTtlMinutes: 5,
+    foldHint: "fixed",
   });
 
   h.setEntries(source);
@@ -154,6 +160,29 @@ test("a token range assigns each branch one recorded limit that survives reloads
   await h.emit("session_tree");
   assert.equal(recorded().length, 1);
   assert.deepEqual(recorded()[0].nudgeAtTokensRange, [100_000, 250_000]);
+});
+
+test("a per-model reminder rule follows the session's model and is recorded with the settings", async () => {
+  const file = path.join(process.env.PI_CODING_AGENT_DIR!, "infinite-context", "settings.json");
+  mkdirSync(path.dirname(file), { recursive: true });
+  const reminders = { default: {}, overrides: { "test-provider/big": { startTokens: 5_000, everyTokens: 1_000 } } };
+  writeFileSync(file, JSON.stringify({ reminders }));
+  const h = harness([entry("u1", "user", "one", 1)]); // reads the file when created
+  rmSync(file);
+  await h.emit("session_start");
+  const recorded = h.entries().find((e) => e.type === "custom" && e.customType === "infinite-context:settings");
+  assert.deepEqual(recorded?.type === "custom" && (recorded.data as Settings).reminders, reminders);
+
+  // The harness reports 10k of a 100k window: below the default start, above the rule's.
+  const turn = { message: { stopReason: "toolUse" }, toolResults: [{}] };
+  Object.assign(h.ctx, { model: { provider: "test-provider", id: "small" } });
+  await h.emit("turn_end", turn);
+  assert.equal(h.sent.length, 0);
+  Object.assign(h.ctx, { model: { provider: "test-provider", id: "big" } });
+  await h.emit("turn_end", turn);
+  assert.equal(h.sent.length, 1);
+  assert.deepEqual(h.sent[0].details, { band: 10_000, tokens: 10_000, window: 100_000, threshold: 5_000, step: 1_000 });
+  assert.match(String(h.sent[0].content), /Context is ~10k tokens \(10% of the 100k-token window\)\. Reminders start at 5k tokens and repeat every 1k\./);
 });
 
 test("registers the approved four-tool surface in sequential mode", () => {
@@ -442,4 +471,50 @@ test("id errors name the id and the next step", async () => {
     /Pattern 1 is not a valid JavaScript regular expression/,
   );
   assert.ok(foldId);
+});
+
+test("foldHint cache-aware (opt-in): the system prompt gets the fold_timing section, reminders get the hint", async () => {
+  // The harness reports 10k of a 100k window; a default start of 5k makes the reminder fire.
+  const reminders = { default: { startTokens: 5_000, everyTokens: 1_000 }, overrides: {} };
+  const file = path.join(process.env.PI_CODING_AGENT_DIR!, "infinite-context", "settings.json");
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify({ foldHint: "cache-aware", reminders }));
+  const r = harness([entry("u1", "user", "one", 1)]);
+  rmSync(file);
+  await r.emit("session_start");
+  const sections: Record<string, string> = { other: "kept" };
+  await r.emit("before_agent_start", { systemPromptOptions: { sections } });
+  assert.deepEqual(Object.keys(sections), ["other", "fold_timing"]);
+  assert.match(sections.fold_timing, /^Fold timing: a fold re-writes the prompt cache/);
+  const turn = { message: { stopReason: "toolUse" }, toolResults: [{}] };
+  Object.assign(r.ctx, {
+    model: { provider: "p", id: "m", cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 } },
+  });
+  await r.emit("turn_end", turn);
+  assert.match(String(r.sent.at(-1)?.content), /Fold hint: the prompt cache is cold, so folding is free now\./);
+  await r.emit("after_provider_response", { status: 200 });
+  await r.emit("turn_end", { ...turn });
+  // Same band: no second reminder until the next step. Fold below the start to re-arm.
+  Object.assign(r.ctx, { getContextUsage: () => ({ contextWindow: 100_000, tokens: 1_000 }) });
+  await r.emit("turn_end", turn);
+  Object.assign(r.ctx, { getContextUsage: () => ({ contextWindow: 100_000, tokens: 10_000 }) });
+  await r.emit("turn_end", turn);
+  assert.equal(r.sent.length, 2);
+  // 7.5k removed, 2.5k kept, (3.75 - 0.3) / 0.3 = 11.5: 11.5 / 3 ≈ 4 turns.
+  assert.match(String(r.sent.at(-1)?.content), /cache is warm; folding the oldest 75% pays off after ≈ 4 more turns \(in general ≈ 11\.5 × K\/R/);
+});
+
+test("foldHint fixed, the default: no fold_timing section and no hint", async () => {
+  const file = path.join(process.env.PI_CODING_AGENT_DIR!, "infinite-context", "settings.json");
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify({ reminders: { default: { startTokens: 5_000 } } }));
+  const h = harness([entry("u1", "user", "one", 1)]);
+  rmSync(file);
+  await h.emit("session_start");
+  const sections: Record<string, string> = { other: "kept", fold_timing: "theirs" };
+  await h.emit("before_agent_start", { systemPromptOptions: { sections } });
+  assert.deepEqual(sections, { other: "kept", fold_timing: "theirs" });
+  await h.emit("turn_end", { message: { stopReason: "toolUse" }, toolResults: [{}] });
+  assert.equal(h.sent.length, 1);
+  assert.doesNotMatch(String(h.sent[0].content), /Fold hint/);
 });
