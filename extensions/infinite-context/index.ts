@@ -27,7 +27,7 @@ import { ProjectionMismatchError, buildOverlay } from "./overlay.ts";
 import { planRootRanges } from "./plan-root-ranges.ts";
 import { serializeMessage } from "./serialize-message.ts";
 import { validateToolUnitOwnership } from "./tool-units.ts";
-import { nudgeSchedule, planNudge } from "./nudge.ts";
+import { nudgeSchedule, planNudge, reminderText } from "./nudge.ts";
 import {
   DEFAULT_SETTINGS,
   type FileSettings,
@@ -212,22 +212,22 @@ export default function infiniteContext(pi: ExtensionAPI) {
     const window = usage?.contextWindow ?? 0;
     const tokens = usage?.tokens ?? null;
     if (window <= 0 || tokens == null) return;
-    const percent = (tokens / window) * 100;
     const message = event.message as { stopReason?: string };
     const continuing = message.stopReason === "toolUse" && event.toolResults.length > 0;
-    const planned = planNudge(tokens, window, settings, lastNudgedBand, continuing);
+    const planned = planNudge(tokens, window, settings, lastNudgedBand, continuing, ctx.model);
     lastNudgedBand = planned.band;
     if (!planned.nudge) return;
+    const schedule = nudgeSchedule(window, settings, ctx.model);
     pi.sendMessage(
       {
         customType: "infinite-context/nudge",
         content:
-          `<context-maintenance>\nContext is ~${Math.round(percent)}% full. ` +
+          `<context-maintenance>\n${reminderText(tokens, window, schedule)} ` +
           "Use context_map, then context_fold completed or superseded roots in one call that frees at least ~15k tokens. " +
           "Keep the active request, open loops, unresolved errors, and evidence needed soon. " +
           "Native compaction is blocked, so an actual overflow will remain visible.\n</context-maintenance>",
         display: true,
-        details: { band: planned.band, tokens, window, ...nudgeSchedule(window, settings) },
+        details: { band: planned.band, tokens, window, ...schedule },
       },
       { deliverAs: "steer" },
     );

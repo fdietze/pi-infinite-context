@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_SETTINGS, parseSettings, resolveSettings, settingsChanged } from "./settings.ts";
+import {
+  DEFAULT_SETTINGS,
+  modelEntries,
+  parseSettings,
+  resolveSettings,
+  settingsChanged,
+} from "./settings.ts";
 
 test("an empty or unreadable file yields the defaults", () => {
   for (const input of ["", "not json", "null", "[]", "42", "{}"]) {
@@ -95,4 +101,65 @@ test("only a record that matches the current settings counts as unchanged", () =
   for (const recorded of [undefined, null, "x", 3, {}]) {
     assert.equal(settingsChanged(recorded, DEFAULT_SETTINGS), true, String(recorded));
   }
+});
+
+test("the reminders block is read as written", () => {
+  const reminders = {
+    default: { everyTokens: 30_000 },
+    overrides: {
+      anthropic: { startTokens: 150_000, everyTokens: 20_000 },
+      "anthropic/claude-opus": { startTokens: 400_000 },
+    },
+  };
+  assert.deepEqual(parseSettings(JSON.stringify({ nudgeAtPercent: 60, reminders })), {
+    ...DEFAULT_SETTINGS,
+    nudgeAtPercent: 60,
+    reminders,
+  });
+  assert.deepEqual(parseSettings(JSON.stringify({ reminders: { overrides: { openai: { everyTokens: 9 } } } })), {
+    ...DEFAULT_SETTINGS,
+    reminders: { default: {}, overrides: { openai: { everyTokens: 9 } } },
+  });
+});
+
+test("invalid rule fields are dropped one by one, and an empty block is no block", () => {
+  assert.deepEqual(
+    parseSettings(
+      JSON.stringify({
+        nudgeAtTokens: 90_000,
+        reminders: {
+          default: { startTokens: 0, everyTokens: 20_000, budget: 1 },
+          overrides: { a: { startTokens: 1.5 }, b: null, c: [], d: { startTokens: 7, everyTokens: "8" } },
+        },
+      }),
+    ),
+    {
+      ...DEFAULT_SETTINGS,
+      nudgeAtTokens: 90_000,
+      reminders: { default: { everyTokens: 20_000 }, overrides: { d: { startTokens: 7 } } },
+    },
+  );
+  for (const reminders of [null, [], 3, {}, { default: {}, overrides: {} }, { overrides: [] }, { default: { startTokens: -1 } }])
+    assert.deepEqual(parseSettings(JSON.stringify({ reminders })), DEFAULT_SETTINGS, JSON.stringify(reminders));
+});
+
+test("resolved settings carry the rules, and a recorded block counts as unchanged only when equal", () => {
+  const file = parseSettings(JSON.stringify({ reminders: { overrides: { anthropic: { startTokens: 9 } } } }));
+  const current = resolveSettings(file, undefined, () => 0);
+  assert.deepEqual(current.reminders, { default: {}, overrides: { anthropic: { startTokens: 9 } } });
+  assert.equal(settingsChanged(JSON.parse(JSON.stringify(current)), current), false);
+  assert.equal(settingsChanged(DEFAULT_SETTINGS, current), true);
+  assert.equal(settingsChanged({ ...current, reminders: { default: {}, overrides: {} } }, current), true);
+  assert.equal(settingsChanged(current, DEFAULT_SETTINGS), true);
+  const range = parseSettings(JSON.stringify({ nudgeAtTokens: [100, 200], reminders: { default: { everyTokens: 5 } } }));
+  assert.deepEqual(resolveSettings(range, undefined, () => 0).reminders, { default: { everyTokens: 5 }, overrides: {} });
+});
+
+test("modelEntries: exact provider/modelId first, then the provider, never inherited keys", () => {
+  const table = { anthropic: 1, "anthropic/opus": 2 };
+  assert.deepEqual(modelEntries(table, { provider: "anthropic", id: "opus" }), [2, 1]);
+  assert.deepEqual(modelEntries(table, { provider: "anthropic", id: "haiku" }), [1]);
+  assert.deepEqual(modelEntries(table, { provider: "openai", id: "opus" }), []);
+  assert.deepEqual(modelEntries(table, undefined), []);
+  assert.deepEqual(modelEntries(table, { provider: "toString" }), []);
 });

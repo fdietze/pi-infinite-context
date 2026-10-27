@@ -53,6 +53,7 @@ function harness(initial: SessionEntry[]) {
   const handlers = new Map<string, Handler[]>();
   const tools = new Map<string, RegisteredTool>();
   const notifications: string[] = [];
+  const sent: Array<{ content?: unknown; details?: unknown }> = [];
   let appended = 0;
   const pi = {
     on(name: string, handler: Handler) {
@@ -73,7 +74,9 @@ function harness(initial: SessionEntry[]) {
         data,
       });
     },
-    sendMessage() {},
+    sendMessage(message: { content?: unknown; details?: unknown }) {
+      sent.push(message);
+    },
   } as unknown as ExtensionAPI;
   const ctx = {
     sessionManager: {
@@ -87,6 +90,7 @@ function harness(initial: SessionEntry[]) {
   return {
     tools,
     notifications,
+    sent,
     ctx,
     entries: () => entries,
     setEntries(next: SessionEntry[]) {
@@ -154,6 +158,29 @@ test("a token range assigns each branch one recorded limit that survives reloads
   await h.emit("session_tree");
   assert.equal(recorded().length, 1);
   assert.deepEqual(recorded()[0].nudgeAtTokensRange, [100_000, 250_000]);
+});
+
+test("a per-model reminder rule follows the session's model and is recorded with the settings", async () => {
+  const file = path.join(process.env.PI_CODING_AGENT_DIR!, "infinite-context", "settings.json");
+  mkdirSync(path.dirname(file), { recursive: true });
+  const reminders = { default: {}, overrides: { "test-provider/big": { startTokens: 5_000, everyTokens: 1_000 } } };
+  writeFileSync(file, JSON.stringify({ reminders }));
+  const h = harness([entry("u1", "user", "one", 1)]); // reads the file when created
+  rmSync(file);
+  await h.emit("session_start");
+  const recorded = h.entries().find((e) => e.type === "custom" && e.customType === "infinite-context:settings");
+  assert.deepEqual(recorded?.type === "custom" && (recorded.data as Settings).reminders, reminders);
+
+  // The harness reports 10k of a 100k window: below the default start, above the rule's.
+  const turn = { message: { stopReason: "toolUse" }, toolResults: [{}] };
+  Object.assign(h.ctx, { model: { provider: "test-provider", id: "small" } });
+  await h.emit("turn_end", turn);
+  assert.equal(h.sent.length, 0);
+  Object.assign(h.ctx, { model: { provider: "test-provider", id: "big" } });
+  await h.emit("turn_end", turn);
+  assert.equal(h.sent.length, 1);
+  assert.deepEqual(h.sent[0].details, { band: 10_000, tokens: 10_000, window: 100_000, threshold: 5_000, step: 1_000 });
+  assert.match(String(h.sent[0].content), /Context is ~10k tokens \(10% of the 100k-token window\)\. Reminders start at 5k tokens and repeat every 1k\./);
 });
 
 test("registers the approved four-tool surface in sequential mode", () => {
