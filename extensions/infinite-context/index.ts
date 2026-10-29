@@ -225,7 +225,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
           // The decision rules live only in the context_fold promptGuidelines below (DRY), so the
           // reminder cannot contradict them.
           `Context reminder: ~${fmtTokens(tokens)} tokens in context (${Math.round(percent)}% of the window, ~${fmtTokens(Math.max(0, window - tokens))} left). ` +
-          "Decide whether to fold now, following the folding guidelines in the system prompt.",
+          "Decide whether to fold now, following the instructions that mention context_fold.",
         display: true,
         details: { band: planned.band, tokens, window, ...nudgeSchedule(window, settings) },
       },
@@ -341,10 +341,10 @@ export default function infiniteContext(pi: ExtensionAPI) {
       "Wrap contiguous root ranges in new folds. Each explicit summary is the new fold's projection; existing folds become children unchanged. Refold a single root fold to revise its active summary while preserving history. The batch is all-or-nothing and tool calls/results remain indivisible.",
     promptSnippet: "Fold context that later work no longer needs into a searchable archive",
     promptGuidelines: [
-      "Fold roots that later work no longer needs, in one call that frees ~15k tokens or more: every kept token is re-read on every later turn, and each fold rewrites the cached prompt prefix, which smaller folds rarely repay. Delay a fold when there is a good reason, such as the task ending within a few turns.",
-      "Keep the thread as roots: governing instructions, the active request, open decisions, unresolved errors, and material in active use. Native compaction is blocked and an overflow fails the turn, so when little room is left, fold regardless, including parts of the thread: restate them in the summary; context_peek recovers details.",
-      "Write each summary so later work rarely needs the originals: results, decisions with their rationale, and open questions. Keep exact wording where later work depends on it or would search for it, such as file paths, identifiers, commands, error messages, quotes, and numbers. Use an empty summary only for disposable noise.",
-      "Use context_map for root ids, context_search to locate archived text, and context_peek to read it. Reads never unfold context.",
+      "Use context_fold on roots that later work no longer needs, batched so one call frees ~15k tokens or more: every kept token is re-read on every later turn, and each fold rewrites the cached prompt prefix, which smaller folds rarely repay. Delay a fold when there is a good reason, such as the task ending within a few turns.",
+      "Keep the thread as roots: governing instructions, the active request, open decisions, unresolved errors, and material in active use. Native compaction is blocked and an overflow fails the turn, so when little room is left, use context_fold regardless, including parts of the thread: restate them in the summary; context_peek recovers details.",
+      "Write each context_fold summary so later work rarely needs the originals: results, decisions with their rationale, and open questions. Keep exact wording where later work depends on it or would search for it, such as file paths, identifiers, commands, error messages, quotes, and numbers. Use an empty summary only for disposable noise.",
+      "Use context_map for root ids, context_search to locate archived text, and context_peek to read it.",
     ],
     parameters: Type.Object({
       items: Type.Array(
