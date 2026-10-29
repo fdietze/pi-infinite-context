@@ -222,9 +222,10 @@ export default function infiniteContext(pi: ExtensionAPI) {
       {
         customType: "infinite-context/nudge",
         content:
-          `Context reminder: context holds ~${fmtTokens(tokens)} tokens (${Math.round(percent)}% of the window, ~${fmtTokens(Math.max(0, window - tokens))} left). ` +
-          "Fold now if folding roots that later work no longer needs frees ~15k tokens and you have no good reason to delay; keep the thread. " +
-          "If little room is left, fold regardless. Otherwise continue.",
+          // The decision rules live only in the context_fold promptGuidelines below (DRY), so the
+          // reminder cannot contradict them.
+          `Context reminder: ~${fmtTokens(tokens)} tokens in context (${Math.round(percent)}% of the window, ~${fmtTokens(Math.max(0, window - tokens))} left). ` +
+          "Decide whether to fold now, following the folding guidelines in the system prompt.",
         display: true,
         details: { band: planned.band, tokens, window, ...nudgeSchedule(window, settings) },
       },
