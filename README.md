@@ -29,7 +29,7 @@ Map and search results provide the IDs to read next.
 
 ## Context reminders
 
-When Pi estimates that context holds at least **150k tokens or 75% of the model's window** (whichever comes first), the extension reminds the agent during tool work to fold what later work no longer needs while keeping the thread (instructions, the active request, open decisions), once that frees about 30% of the context or little room is left. Each reminder states that share in tokens. If the agent does not fold, it reminds again after another 15k tokens (sooner when little room remains). In practice the agent folds at the first reminder most of the time, so repeats are rare.
+When Pi estimates that context holds at least **150k tokens or 75% of the model's window** (whichever comes first), the extension reminds the agent during tool work to fold what later work no longer needs while keeping the thread (instructions, the active request, open decisions), once that frees about 30% of the context or little room is left. Each reminder states that share in tokens. If the agent does not fold, it reminds again after another 15k tokens (sooner when little room remains). In practice the agent folds at the first reminder 87% of the time, so repeats are rare.
 
 Optional file `~/.pi/agent/infinite-context/settings.json` (inside Pi's configured agent directory) changes the limits; missing or invalid values use the defaults, and changes apply after restarting Pi:
 
@@ -47,13 +47,18 @@ Pi's own compaction, including `/compact`, is blocked. If the agent does not fol
 
 If saved folds cannot be applied (the snapshot does not match the branch, the branch fails a check, or the request cannot be mapped to the history), the extension stops the first request and shows the reason, instead of sending the unfolded transcript, which costs several times more and can overflow the window. Send another message to continue unfolded (the status line then shows "folds not applied: sending unfolded"), hand the work over to a new session, or have another agent repair the session file. Reloading tries the folds again. Subagents show no notice; their parent sees an aborted run. Without folds, nothing changes.
 
-## Prefix caching
+## When a fold pays off
 
-Providers cache the start of a prompt and charge about 20× less for cached tokens. A fold changes the prompt from the folded messages onward, so the first request after a fold is mostly uncached. After that, the new prompt is cached again.
+Providers cache the start of a prompt; cached tokens cost about a tenth of uncached ones. A fold changes the prompt from the first folded message onward, so the next request reads that part uncached (47% cached instead of 99%). After that, the shorter prompt is cached again and every request reads fewer tokens.
 
-Measured on the author's sessions: 89,000 requests, 92 sessions with 502 folds, mixed models.
+So a fold costs its folding turns plus that one cache miss, together about ten cached reads of the whole context, and earns a little back on every later request. Whether it pays off depends on the share of the context it frees, not on the number of tokens:
 
-- **98% of input tokens came from the cache** for requests less than 2 minutes apart. Sessions with folds: 98.0%. Sessions without folds: 98.3%.
-- **Only the first request after a fold misses**: 50% cached instead of 98%. A fold happens about once per 56 requests.
-- **A fold shrinks the context** from 121k to 47k tokens (median). A fold costs its folding turns plus the cache miss, together about ten cached reads of the whole context. Over 1,218 folds in 90 days, counting cheaper reads until the next fold as savings, a fold returned about $0.2 per $1 when it freed less than 20% of the context, broke even between 20% and 30% (reliably only from 30%), and returned about $4 at 40–50% and $14 at 70–80%. So the reminders ask for about 30%.
-- After 5 minutes idle, only 18% of input is cached.
+![Return per dollar of 1,232 folds against the share of context each freed, on a log scale. The median return rises from about 0.2 below 20% freed, crosses 1 between 20% and 30%, and reaches about 13 at 70-80%.](docs/fold-payoff.png)
+
+Each dot is one fold: the share of the context it freed (x) and the dollars it saved per dollar it cost (y, log scale), counting savings until the next fold. The black line is the return of all folds in each 10% step, the gray band its 90% interval. Above the dashed line a fold paid off.
+
+- Folds that free less than 20% lose money: about $0.2 back per $1.
+- Folds break even between 20% and 30% and reliably pay off from 30%: about $4 back at 40–50%, about $13 at 70–80%.
+- So the reminders ask for about 30% of the context.
+
+Measured on the author's sessions over 90 days: 1,232 folds, Claude and GPT models. A median fold shrank the context from 152k to 46k tokens. Only cost is measured, not how folding affects the quality of the agent's work. The chart comes from [context-efficiency](https://github.com/fdietze/context-efficiency) (`context-efficiency-metrics --all-projects --since 90d --html report.html`).

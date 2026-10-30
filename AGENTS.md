@@ -14,6 +14,7 @@ Use simple, accurate English and keep both documents very concise.
 - `scripts/*.test.ts`: release-policy and real package-content checks.
 - `package.json` → `files`, `extensions/infinite-context/.npmignore`: published files and test exclusions.
 - `docs/folding.svg`: recursive folding diagram embedded in the README.
+- `docs/fold-payoff.png`: fold return chart embedded in the README, rendered from [context-efficiency](https://github.com/fdietze/context-efficiency).
 - `DESIGN.md`: archive vocabulary, data structure, fold algebra, and invariants.
 - `extensions/infinite-context/index.ts`: Pi integration and tool registration.
 - `extensions/infinite-context/forest.ts`: pure recursive archive state and transforms.

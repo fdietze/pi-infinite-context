@@ -18,7 +18,7 @@ test("the npm package contains the extension and README resources, not developme
     const source = readdirSync("extensions/infinite-context")
       .filter((name) => name.endsWith(".ts") && !name.endsWith(".test.ts") && name !== "pi-test-fixtures.ts")
       .map((name) => `extensions/infinite-context/${name}`);
-    assert.deepEqual(actual, ["package.json", "README.md", "LICENSE", "DESIGN.md", "docs/folding.svg", "docs/publishing.md", ...source].sort());
+    assert.deepEqual(actual, ["package.json", "README.md", "LICENSE", "DESIGN.md", "docs/folding.svg", "docs/fold-payoff.png", "docs/publishing.md", ...source].sort());
   } finally {
     rmSync(cache, { recursive: true, force: true });
   }

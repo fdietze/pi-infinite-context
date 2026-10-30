@@ -10,7 +10,7 @@
     "url": "git+https://github.com/fdietze/pi-infinite-context.git"
   },
   "type": "module",
-  "files": ["extensions/infinite-context", "docs/folding.svg", "docs/publishing.md", "DESIGN.md"],
+  "files": ["extensions/infinite-context", "docs/folding.svg", "docs/fold-payoff.png", "docs/publishing.md", "DESIGN.md"],
   "pi": {
     "extensions": ["extensions/infinite-context/index.ts"]
   },
