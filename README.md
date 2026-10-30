@@ -45,6 +45,8 @@ The agent chooses what to fold and writes the summaries. Reminders do not fold a
 
 Pi's own compaction, including `/compact`, is blocked. If the agent does not fold enough, the context can still overflow.
 
+If saved folds cannot be applied (the snapshot does not match the branch, the branch fails a check, or the request cannot be mapped to the history), the extension stops the first request and shows the reason, instead of sending the unfolded transcript, which costs several times more and can overflow the window. Send another message to continue unfolded (the status line then shows "folds not applied: sending unfolded"), hand the work over to a new session, or have another agent repair the session file. Reloading tries the folds again. Subagents show no notice; their parent sees an aborted run. Without folds, nothing changes.
+
 ## Prefix caching
 
 Providers cache the start of a prompt and charge about 20× less for cached tokens. A fold changes the prompt from the folded messages onward, so the first request after a fold is mostly uncached. After that, the new prompt is cached again.

@@ -49,3 +49,4 @@ Revising a summary means `fold(newId, newSummary, [oldFold])`, not changing `old
 5. In model context, a root fold's summary message replaces its live leaves at the first live leaf. A root without live leaves emits nothing.
 6. A batch wraps disjoint ranges atomically: all ranges validate before one complete snapshot is appended. Reads change nothing and never unfold.
 7. The current branch is complete: it starts at the session root and contains no native compaction. Otherwise the archive refuses to load instead of guessing.
+8. While the branch has saved folds, a request never goes out unfolded unnoticed: if the folds cannot be applied, the first request after loading stops with the reason, and only later requests go out unfolded.

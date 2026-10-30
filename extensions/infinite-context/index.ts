@@ -24,6 +24,7 @@ import { unknownIdError } from "./id-errors.ts";
 import { assertSupportedBranch } from "./assert-supported-branch.ts";
 import { branchOriginals, projectedPositions } from "./originals.ts";
 import { ProjectionMismatchError, buildOverlay } from "./overlay.ts";
+import { snapshotHasFolds, stoppedRequest, unappliedFoldsNotice } from "./unapplied-folds.ts";
 import { planRootRanges } from "./plan-root-ranges.ts";
 import { serializeMessage } from "./serialize-message.ts";
 import { validateToolUnitOwnership } from "./tool-units.ts";
@@ -106,6 +107,11 @@ export default function infiniteContext(pi: ExtensionAPI) {
   let roots: Forest = [];
   let stateError: Error | undefined;
   let loaded = false;
+  // The branch's last snapshot holds a fold, even when loading it failed.
+  let foldsSaved = false;
+  // A request was already stopped because the folds cannot be applied; later requests mean the
+  // user chose to continue unfolded. Reset by load(), so a reload tries the folds again.
+  let stopped = false;
   // Branch state: one Pi process can switch sessions (/new, /resume, /tree), so load() sets
   // both for the branch it loads; nothing leaks from the previous branch's reminder arm.
   let settings: Settings = DEFAULT_SETTINGS;
@@ -117,14 +123,19 @@ export default function infiniteContext(pi: ExtensionAPI) {
   const load = (ctx: ExtensionContext) => {
     stateError = undefined;
     loaded = true;
+    foldsSaved = false;
+    stopped = false;
+    ctx.ui.setStatus("infinite-context", undefined);
     try {
       const entries = branch(ctx);
-      assertSupportedBranch(entries);
-      const originals = branchOriginals(entries, ctx.sessionManager.buildSessionProjection());
       let saved: Extract<SessionEntry, { type: "custom" }> | undefined;
       for (const entry of entries)
         if (entry.type === "custom" && entry.customType === INFINITE_CONTEXT_ENTRY)
           saved = entry;
+      // Before the branch checks, so a branch that fails them still counts its folds.
+      foldsSaved = snapshotHasFolds(saved?.data);
+      assertSupportedBranch(entries);
+      const originals = branchOriginals(entries, ctx.sessionManager.buildSessionProjection());
       roots = saved
         ? parseSnapshot(saved.data).roots
         : originals.map(({ id }) => messageItem(id));
@@ -179,21 +190,31 @@ export default function infiniteContext(pi: ExtensionAPI) {
   pi.on("session_tree", async (_event, ctx) => load(ctx));
 
   pi.on("context", async (event, ctx) => {
-    if (stateError) return;
-    const state = current(ctx);
     try {
+      const state = current(ctx);
       return {
         messages: buildOverlay(event.messages, state.positions, state.originals, state.roots),
       };
     } catch (error) {
-      // Without a trustworthy position mapping, folding the request could drop a
-      // tool result and break the turn: leave the request untouched and say so.
-      if (!(error instanceof ProjectionMismatchError)) throw error;
-      ctx.ui.notify(
-        `infinite-context: folds are not applied to this request. ${error.message}`,
-        "error",
-      );
-      return;
+      // One rule for every failure: with folds, the request must not silently go out unfolded.
+      // Stop once and let the user decide (Margin of Safety). A failure here is usually ours
+      // (e.g. a Pi change the mapping does not know), so later requests go out unfolded rather
+      // than ending the session for good.
+      if (foldsSaved || roots.some((root) => root.kind === "fold")) {
+        if (stopped) return;
+        stopped = true;
+        // Stays visible while later requests go out unfolded, so the higher cost is never silent.
+        ctx.ui.setStatus("infinite-context", "folds not applied: sending unfolded");
+        ctx.ui.notify(
+          unappliedFoldsNotice((error as Error).message, ctx.sessionManager.getSessionFile()),
+          "error",
+        );
+        ctx.abort();
+        return { messages: stoppedRequest(Date.now()) };
+      }
+      // Without folds, the untouched request is exactly what folding would send.
+      if (error === stateError || error instanceof ProjectionMismatchError) return;
+      throw error;
     }
   });
 

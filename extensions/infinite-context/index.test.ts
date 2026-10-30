@@ -53,7 +53,9 @@ function harness(initial: SessionEntry[]) {
   const handlers = new Map<string, Handler[]>();
   const tools = new Map<string, RegisteredTool>();
   const notifications: string[] = [];
+  let status: string | undefined;
   const sent: string[] = [];
+  let aborts = 0;
   let usage = { contextWindow: 100_000, tokens: 10_000 };
   let appended = 0;
   const pi = {
@@ -83,8 +85,17 @@ function harness(initial: SessionEntry[]) {
     sessionManager: {
       getBranch: () => linkEntries(entries),
       buildSessionProjection: () => projectionOf(entries),
+      getSessionFile: () => "/sessions/s.jsonl",
     },
-    ui: { notify: (text: string) => notifications.push(text) },
+    ui: {
+      notify: (text: string) => notifications.push(text),
+      setStatus: (_key: string, text: string | undefined) => {
+        status = text;
+      },
+    },
+    abort: () => {
+      aborts++;
+    },
     getContextUsage: () => usage,
   } as unknown as ExtensionContext;
   infiniteContext(pi);
@@ -92,6 +103,8 @@ function harness(initial: SessionEntry[]) {
     tools,
     notifications,
     sent,
+    aborts: () => aborts,
+    status: () => status,
     ctx,
     setUsage(next: typeof usage) {
       usage = next;
@@ -465,4 +478,104 @@ test("id errors name the id and the next step", async () => {
     /Pattern 1 is not a valid JavaScript regular expression/,
   );
   assert.ok(foldId);
+});
+
+const snapshotEntry = (parentId: string, roots: unknown[]): SessionEntry => ({
+  type: "custom",
+  id: "state",
+  parentId,
+  timestamp: new Date(9).toISOString(),
+  customType: "infinite-context",
+  data: { version: 2, roots },
+});
+const requestOf = (entries: SessionEntry[]) => ({
+  messages: entries.flatMap((e) => (e.type === "message" ? [{ ...e.message }] : [])),
+});
+const compactionEntry = (parentId: string): SessionEntry => ({
+  type: "compaction",
+  id: "compaction",
+  parentId,
+  timestamp: new Date(10).toISOString(),
+  summary: "native summary",
+  firstKeptEntryId: parentId,
+  tokensBefore: 1,
+});
+const foldedHarness = async () => {
+  const source = [entry("u1", "user", "one", 1), entry("u2", "user", "two", 2), entry("u3", "user", "three", 3)];
+  const h = harness(source);
+  await h.emit("session_start");
+  await h.tools.get("context_fold")!.execute(
+    "call",
+    { items: [{ from: "u1", to: "u2", summary: "both" }] },
+    undefined,
+    undefined,
+    h.ctx,
+  );
+  return { h, source };
+};
+
+test("saved folds that cannot be loaded stop the first request, then the user's next request goes out unfolded", async () => {
+  const source = [entry("u1", "user", "one", 1), entry("u2", "user", "two", 2)];
+  // The snapshot lists an original the branch no longer has.
+  const h = harness([
+    ...source,
+    snapshotEntry("u2", [
+      { kind: "fold", id: "fold-a", summary: "s", children: [{ kind: "message", id: "gone" }] },
+      { kind: "message", id: "u1" },
+      { kind: "message", id: "u2" },
+    ]),
+  ]);
+  await h.emit("session_start");
+  const stopped = (await h.emit("context", requestOf(source))) as { messages: AgentMessage[] };
+  assert.equal(stopped.messages.length, 1);
+  assert.equal(h.aborts(), 1);
+  const notice = h.notifications.at(-1)!;
+  assert.match(notice, /saved folds cannot be applied \(Snapshot lists message gone/);
+  assert.match(notice, /continue unfolded, hand the work over to a new session, or have another agent repair the session file \/sessions\/s\.jsonl\./);
+
+  assert.equal(await h.emit("context", requestOf(source)), undefined);
+  assert.equal(h.aborts(), 1);
+  assert.equal(h.status(), "folds not applied: sending unfolded");
+
+  // A reload tries the folds again and stops again.
+  await h.emit("session_start", { reason: "reload" });
+  assert.equal(h.status(), undefined);
+  await h.emit("context", requestOf(source));
+  assert.equal(h.aborts(), 2);
+});
+
+test("a snapshot without folds that cannot be loaded leaves the request untouched", async () => {
+  const source = [entry("u1", "user", "one", 1)];
+  const h = harness([...source, snapshotEntry("u1", [{ kind: "message", id: "gone" }])]);
+  await h.emit("session_start");
+  assert.equal(await h.emit("context", requestOf(source)), undefined);
+  assert.equal(h.aborts(), 0);
+});
+
+test("a request whose projection does not match stops only when folds exist", async () => {
+  const plain = harness([entry("u1", "user", "one", 1), entry("u2", "user", "two", 2)]);
+  await plain.emit("session_start");
+  assert.equal(await plain.emit("context", { messages: [] }), undefined);
+  assert.equal(plain.aborts(), 0);
+
+  const { h } = await foldedHarness();
+  const stopped = (await h.emit("context", { messages: [] })) as { messages: AgentMessage[] };
+  assert.equal(stopped.messages.length, 1);
+  assert.equal(h.aborts(), 1);
+});
+
+test("a branch that fails the checks at request time stops with folds in memory and rethrows without", async () => {
+  const { h, source } = await foldedHarness();
+  // The branch becomes unsupported after the load: current() throws inside the context handler.
+  h.setEntries([...h.entries(), compactionEntry("u3")]);
+  await h.emit("context", requestOf(source));
+  assert.equal(h.aborts(), 1);
+  assert.match(h.notifications.at(-1)!, /saved folds cannot be applied \(.*native compaction/);
+
+  const plainSource = [entry("u1", "user", "one", 1), entry("u2", "user", "two", 2)];
+  const plain = harness(plainSource);
+  await plain.emit("session_start");
+  plain.setEntries([...plainSource, compactionEntry("u2")]);
+  await assert.rejects(plain.emit("context", requestOf(plainSource)), /native compaction/);
+  assert.equal(plain.aborts(), 0);
 });
