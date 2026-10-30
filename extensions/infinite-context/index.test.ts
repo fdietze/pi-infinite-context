@@ -53,6 +53,8 @@ function harness(initial: SessionEntry[]) {
   const handlers = new Map<string, Handler[]>();
   const tools = new Map<string, RegisteredTool>();
   const notifications: string[] = [];
+  const sent: string[] = [];
+  let usage = { contextWindow: 100_000, tokens: 10_000 };
   let appended = 0;
   const pi = {
     on(name: string, handler: Handler) {
@@ -73,7 +75,9 @@ function harness(initial: SessionEntry[]) {
         data,
       });
     },
-    sendMessage() {},
+    sendMessage(message: { content: string }) {
+      sent.push(message.content);
+    },
   } as unknown as ExtensionAPI;
   const ctx = {
     sessionManager: {
@@ -81,13 +85,17 @@ function harness(initial: SessionEntry[]) {
       buildSessionProjection: () => projectionOf(entries),
     },
     ui: { notify: (text: string) => notifications.push(text) },
-    getContextUsage: () => ({ contextWindow: 100_000, tokens: 10_000 }),
+    getContextUsage: () => usage,
   } as unknown as ExtensionContext;
   infiniteContext(pi);
   return {
     tools,
     notifications,
+    sent,
     ctx,
+    setUsage(next: typeof usage) {
+      usage = next;
+    },
     entries: () => entries,
     setEntries(next: SessionEntry[]) {
       entries = next;
@@ -154,6 +162,21 @@ test("a token range assigns each branch one recorded limit that survives reloads
   await h.emit("session_tree");
   assert.equal(recorded().length, 1);
   assert.deepEqual(recorded()[0].nudgeAtTokensRange, [100_000, 250_000]);
+});
+
+test("a reminder names the fold size that pays off and skips the stale usage of a folding turn", async () => {
+  const h = harness([entry("u1", "user", "one", 1)]);
+  await h.emit("session_start");
+  h.setUsage({ contextWindow: 1_000_000, tokens: 200_000 });
+  const turn = (toolName: string) =>
+    h.emit("turn_end", { message: { stopReason: "toolUse" }, toolResults: [{ toolName }] });
+
+  await turn("context_fold");
+  assert.deepEqual(h.sent, []);
+
+  await turn("bash");
+  assert.equal(h.sent.length, 1);
+  assert.match(h.sent[0], /frees ~60k tokens or more/);
 });
 
 test("registers the approved four-tool surface in sequential mode", () => {

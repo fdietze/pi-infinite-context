@@ -8,6 +8,15 @@ import type { Settings } from "./settings.ts";
  */
 export const NUDGE_STEP_TOKENS = 15_000;
 
+/**
+ * Share of the context one context_fold call should free to repay its cost. A fold costs its
+ * folding turns plus the cache miss it causes, about ten cached reads of the whole context, so the
+ * break-even scales with context size, not with a fixed token count. Measured return per dollar
+ * crosses 1 between 20% and 30% freed (1,218 folds over 90 days; context-efficiency
+ * chart_fold_payoff.py).
+ */
+export const FOLD_MIN_SHARE = 0.3;
+
 /** Reminders that must fit between the threshold and the window's end. */
 export const NUDGES_BEFORE_OVERFLOW = 3;
 

@@ -27,7 +27,7 @@ import { ProjectionMismatchError, buildOverlay } from "./overlay.ts";
 import { planRootRanges } from "./plan-root-ranges.ts";
 import { serializeMessage } from "./serialize-message.ts";
 import { validateToolUnitOwnership } from "./tool-units.ts";
-import { nudgeSchedule, planNudge } from "./nudge.ts";
+import { FOLD_MIN_SHARE, nudgeSchedule, planNudge } from "./nudge.ts";
 import {
   DEFAULT_SETTINGS,
   type FileSettings,
@@ -214,7 +214,10 @@ export default function infiniteContext(pi: ExtensionAPI) {
     if (window <= 0 || tokens == null) return;
     const percent = (tokens / window) * 100;
     const message = event.message as { stopReason?: string };
-    const continuing = message.stopReason === "toolUse" && event.toolResults.length > 0;
+    // A turn that folded reports the usage of its pre-fold request, so its token count is stale
+    // until the next response; skipping it keeps a reminder from firing right after a fold.
+    const folded = event.toolResults.some((r) => r.toolName === "context_fold");
+    const continuing = message.stopReason === "toolUse" && event.toolResults.length > 0 && !folded;
     const planned = planNudge(tokens, window, settings, lastNudgedBand, continuing);
     lastNudgedBand = planned.band;
     if (!planned.nudge) return;
@@ -222,9 +225,10 @@ export default function infiniteContext(pi: ExtensionAPI) {
       {
         customType: "infinite-context/nudge",
         content:
-          // The decision rules live only in the context_fold promptGuidelines below (DRY), so the
-          // reminder cannot contradict them.
+          // The decision rules live in the context_fold promptGuidelines below; the reminder only
+          // adds the current numbers, with the fold size derived from the same FOLD_MIN_SHARE (DRY).
           `Context reminder: ~${fmtTokens(tokens)} tokens in context (${Math.round(percent)}% of the window, ~${fmtTokens(Math.max(0, window - tokens))} left). ` +
+          `A fold pays off when one context_fold call frees ~${fmtTokens(Math.round(tokens * FOLD_MIN_SHARE))} tokens or more. ` +
           "Decide whether to fold now, following the instructions that mention context_fold.",
         display: true,
         details: { band: planned.band, tokens, window, ...nudgeSchedule(window, settings) },
@@ -341,7 +345,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
       "Wrap contiguous root ranges in new folds. Each explicit summary is the new fold's projection; existing folds become children unchanged. Refold a single root fold to revise its active summary while preserving history. The batch is all-or-nothing and tool calls/results remain indivisible.",
     promptSnippet: "Fold context that later work no longer needs into a searchable archive",
     promptGuidelines: [
-      "Use context_fold on roots that later work no longer needs, batched so one call frees ~30% of the context or more: every kept token is re-read on every later turn, while a fold costs about ten re-reads of the whole context (the folding turns plus rewriting the cached prompt prefix), which smaller folds rarely repay. Delay a fold when there is a good reason, such as the task ending within a few turns.",
+      `Use context_fold on roots that later work no longer needs, batched so one call frees ~${FOLD_MIN_SHARE * 100}% of the context or more: every kept token is re-read on every later turn, while a fold costs about ten re-reads of the whole context (the folding turns plus rewriting the cached prompt prefix), which smaller folds rarely repay. Delay a fold when there is a good reason, such as the task ending within a few turns.`,
       "Keep the thread as roots: governing instructions, the active request, open decisions, unresolved errors, and material in active use. Native compaction is blocked and an overflow fails the turn, so when little room is left, use context_fold regardless, including parts of the thread: restate them in the summary; context_peek recovers details.",
       "Write each context_fold summary so later work rarely needs the originals: results, decisions with their rationale, and open questions. Keep exact wording where later work depends on it or would search for it, such as file paths, identifiers, commands, error messages, quotes, and numbers. Use an empty summary only for disposable noise.",
       "Use context_map for root ids, context_search to locate archived text, and context_peek to read it.",
