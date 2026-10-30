@@ -29,7 +29,7 @@ Map and search results provide the IDs to read next.
 
 ## Context reminders
 
-When Pi estimates that context holds at least **150k tokens or 75% of the model's window** (whichever comes first), the extension reminds the agent during tool work to fold what later work no longer needs while keeping the thread (instructions, the active request, open decisions), once that frees about 15k tokens or little room is left. It reminds again every 15k tokens as usage rises (closer together when little room remains).
+When Pi estimates that context holds at least **150k tokens or 75% of the model's window** (whichever comes first), the extension reminds the agent during tool work to fold what later work no longer needs while keeping the thread (instructions, the active request, open decisions), once that frees about 30% of the context or little room is left. It reminds again every 15k tokens as usage rises (closer together when little room remains).
 
 Optional file `~/.pi/agent/infinite-context/settings.json` (inside Pi's configured agent directory) changes the limits; missing or invalid values use the defaults, and changes apply after restarting Pi:
 
@@ -53,5 +53,5 @@ Measured on the author's sessions: 89,000 requests, 92 sessions with 502 folds, 
 
 - **98% of input tokens came from the cache** for requests less than 2 minutes apart. Sessions with folds: 98.0%. Sessions without folds: 98.3%.
 - **Only the first request after a fold misses**: 50% cached instead of 98%. A fold happens about once per 56 requests.
-- **A fold shrinks the context** from 121k to 47k tokens (median). The cache miss pays for itself after about 3 to 6 requests for folds that free 15k tokens or more. Folds that free less than 15k often never pay off, so the reminders ask for 15k or more.
+- **A fold shrinks the context** from 121k to 47k tokens (median). A fold costs its folding turns plus the cache miss, together about ten cached reads of the whole context. Over 1,218 folds in 90 days, counting cheaper reads until the next fold as savings, a fold returned about $0.2 per $1 when it freed less than 20% of the context, broke even between 20% and 30% (reliably only from 30%), and returned about $4 at 40–50% and $14 at 70–80%. So the reminders ask for about 30%.
 - After 5 minutes idle, only 18% of input is cached.
