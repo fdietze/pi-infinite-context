@@ -1,7 +1,7 @@
 {
   "name": "pi-infinite-context",
   "version": "0.1.0",
-  "description": "Keep long-lived Pi sessions searchable by recursively folding finished context into summarized archive nodes.",
+  "description": "Extension for long-running sessions. The agent replaces old work in its context with short summaries. The original messages stay saved and searchable.",
   "keywords": ["pi-package"],
   "license": "MIT",
   "author": "fdietze",
