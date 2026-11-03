@@ -31,9 +31,9 @@ Map and search results provide the IDs to read next.
 
 From **150k tokens or 75% of the window** (whichever comes first), the extension reminds the agent to fold while it works with tools. The reminder says how many tokens a fold should free: about 30% of the context ([why](#when-a-fold-pays-off)). If the agent does not fold, it reminds again after another 15k tokens. In practice it folds at the first reminder 77% of the time. Reminders never fold anything themselves.
 
-![Cost per prompt of 67 sessions, each with a random reminder limit between 100k and 300k tokens. The fitted line is almost flat, and the shaded range where the cheapest limit may lie covers the whole range.](docs/reminder-limit.png)
+![Cost per prompt of 67 sessions, each with a random reminder limit between 100k and 300k tokens, in four bars of 50k. All bars are close to 1 and their whiskers overlap.](docs/reminder-limit.png)
 
-Why 150k: in this experiment, each session got a random limit between 100k and 300k tokens. Each dot is one session, and bigger dots have more prompts. The line is the trend, and the shaded area is where the cheapest limit may lie. So far, no limit in this range is clearly cheaper: the trend is almost flat, but 12 session trees are too few to tell the limits apart. 150k keeps the context small without costing more in this data.
+Why 150k: in this experiment, each session got a random limit between 100k and 300k tokens. Each bar shows what the sessions with a limit in that band cost per prompt, where 1 is the average for their model. The whisker is the 90% interval. So far, no limit in this range is clearly cheaper: all bars are within a few percent of 1 and their whiskers overlap, but 12 session trees are too few to rule out a real difference. 150k keeps the context small without costing more in this data.
 
 Change the limits in `~/.pi/agent/infinite-context/settings.json` and restart Pi:
 
@@ -44,8 +44,6 @@ Change the limits in `~/.pi/agent/infinite-context/settings.json` and restart Pi
 `nudgeAtTokens` can also be a range like `[100000, 300000]`. Each session then draws its own limit, which is how the experiment above works. Sessions record their limits and reminders, so tools like [context-efficiency](https://github.com/fdietze/context-efficiency) can analyze them.
 
 Pi's own compaction, including `/compact`, is blocked. If the agent does not fold enough, the context can still overflow.
-
-If saved folds no longer match the session, the extension stops the next request and says why. Sending the whole history unfolded would cost several times more and could overflow the window. Send another message to continue unfolded, or hand the work over to a new session. Reloading tries the folds again.
 
 ## When a fold pays off
 
