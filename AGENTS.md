@@ -11,7 +11,8 @@ Use simple, accurate English and keep both documents very concise.
 - `docs/publishing.md`: CI release semantics and one-time npm Trusted Publisher setup.
 - `.github/workflows/ci.yml`: checks and serialized OIDC publishing on pushes to `main`.
 - `scripts/publish.ts`: CI-only versioning, tarball integrity checks and release-tag selection.
-- `scripts/*.test.ts`: release-policy and real package-content checks.
+- `scripts/repair-session.ts`: `node scripts/repair-session.ts <session.jsonl>` repairs a session file torn by an interrupted write (full disk). It writes a verified copy first, then replaces the file and keeps `<session.jsonl>.bak`.
+- `scripts/*.test.ts`: release-policy, package-content and session-repair checks.
 - `package.json` → `files`, `extensions/infinite-context/.npmignore`: published files and test exclusions.
 - `docs/folding.svg`: recursive folding diagram embedded in the README.
 - `docs/fold-payoff.png`, `docs/reminder-limit.png`: charts embedded in the README that justify the default fold share and reminder limit, rendered from [context-efficiency](https://github.com/fdietze/context-efficiency).
