@@ -150,9 +150,11 @@ function repairFile(path: string): void {
   const repaired = `${path}.repaired`;
   writeFileSync(repaired, text);
   verifySession(repaired);
-  copyFileSync(path, `${path}.bak`, constants.COPYFILE_EXCL);
+  // A timestamp keeps the backup of an earlier repair (the least damaged copy) intact.
+  const backup = `${path}.${Date.now()}.bak`;
+  copyFileSync(path, backup, constants.COPYFILE_EXCL);
   renameSync(repaired, path);
-  console.log(`repaired; original saved as ${path}.bak`);
+  console.log(`repaired; original saved as ${backup}`);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
