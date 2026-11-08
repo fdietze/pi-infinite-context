@@ -24,7 +24,11 @@ import { unknownIdError } from "./id-errors.ts";
 import { assertSupportedBranch } from "./assert-supported-branch.ts";
 import { branchOriginals, projectedPositions } from "./originals.ts";
 import { ProjectionMismatchError, buildOverlay } from "./overlay.ts";
-import { snapshotHasFolds, stoppedRequest, unappliedFoldsNotice } from "./unapplied-folds.ts";
+import {
+  snapshotHasFolds,
+  stoppedRequest,
+  unappliedFoldsNotice,
+} from "./unapplied-folds.ts";
 import { planRootRanges } from "./plan-root-ranges.ts";
 import { serializeMessage } from "./serialize-message.ts";
 import { validateToolUnitOwnership } from "./tool-units.ts";
@@ -67,17 +71,20 @@ const PageParams = {
   offset: Type.Optional(
     Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
   ),
-  limit: Type.Optional(
-    Type.Integer({ minimum: 1, maximum: MAX_PAGE_LIMIT }),
-  ),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_PAGE_LIMIT })),
 };
 
-function directItems(roots: Forest, id?: string): { label: string; items: Forest } {
+function directItems(
+  roots: Forest,
+  id?: string,
+): { label: string; items: Forest } {
   if (!id) return { label: "roots", items: roots };
   const item = findItem(roots, id);
   if (!item) throw unknownIdError(id);
   if (item.kind !== "fold")
-    throw new Error(`"${id}" is a message, not a fold: it has no children. Use context_peek to read it.`);
+    throw new Error(
+      `"${id}" is a message, not a fold: it has no children. Use context_peek to read it.`,
+    );
   return { label: `children of ${id}`, items: item.children };
 }
 
@@ -130,16 +137,25 @@ export default function infiniteContext(pi: ExtensionAPI) {
       const entries = branch(ctx);
       let saved: Extract<SessionEntry, { type: "custom" }> | undefined;
       for (const entry of entries)
-        if (entry.type === "custom" && entry.customType === INFINITE_CONTEXT_ENTRY)
+        if (
+          entry.type === "custom" &&
+          entry.customType === INFINITE_CONTEXT_ENTRY
+        )
           saved = entry;
       // Before the branch checks, so a branch that fails them still counts its folds.
       foldsSaved = snapshotHasFolds(saved?.data);
       assertSupportedBranch(entries);
-      const originals = branchOriginals(entries, ctx.sessionManager.buildSessionProjection());
+      const originals = branchOriginals(
+        entries,
+        ctx.sessionManager.buildSessionProjection(),
+      );
       roots = saved
         ? parseSnapshot(saved.data).roots
         : originals.map(({ id }) => messageItem(id));
-      roots = syncOriginals(roots, originals.map(({ id }) => id));
+      roots = syncOriginals(
+        roots,
+        originals.map(({ id }) => id),
+      );
       validateToolUnitOwnership(roots, originals);
     } catch (error) {
       stateError = error as Error;
@@ -156,10 +172,12 @@ export default function infiniteContext(pi: ExtensionAPI) {
   const resolveBranchSettings = (ctx: ExtensionContext) => {
     let recorded: unknown;
     for (const entry of branch(ctx))
-      if (entry.type === "custom" && entry.customType === SETTINGS_ENTRY) recorded = entry.data;
+      if (entry.type === "custom" && entry.customType === SETTINGS_ENTRY)
+        recorded = entry.data;
     settings = resolveSettings(fileSettings, recorded, Math.random);
     lastNudgedBand = 0;
-    if (settingsChanged(recorded, settings)) pi.appendEntry(SETTINGS_ENTRY, settings);
+    if (settingsChanged(recorded, settings))
+      pi.appendEntry(SETTINGS_ENTRY, settings);
   };
 
   const current = (ctx: ExtensionContext) => {
@@ -171,13 +189,18 @@ export default function infiniteContext(pi: ExtensionAPI) {
     assertSupportedBranch(entries);
     const projection = ctx.sessionManager.buildSessionProjection();
     const originals = branchOriginals(entries, projection);
-    const derivedRoots = syncOriginals(roots, originals.map(({ id }) => id));
+    const derivedRoots = syncOriginals(
+      roots,
+      originals.map(({ id }) => id),
+    );
     validateToolUnitOwnership(derivedRoots, originals);
     return {
       roots: derivedRoots,
       originals,
       positions: projectedPositions(projection),
-      byId: new Map(originals.map((original) => [original.id, original] as const)),
+      byId: new Map(
+        originals.map((original) => [original.id, original] as const),
+      ),
     };
   };
 
@@ -193,7 +216,12 @@ export default function infiniteContext(pi: ExtensionAPI) {
     try {
       const state = current(ctx);
       return {
-        messages: buildOverlay(event.messages, state.positions, state.originals, state.roots),
+        messages: buildOverlay(
+          event.messages,
+          state.positions,
+          state.originals,
+          state.roots,
+        ),
       };
     } catch (error) {
       // One rule for every failure: with folds, the request must not silently go out unfolded.
@@ -204,16 +232,23 @@ export default function infiniteContext(pi: ExtensionAPI) {
         if (stopped) return;
         stopped = true;
         // Stays visible while later requests go out unfolded, so the higher cost is never silent.
-        ctx.ui.setStatus("infinite-context", "folds not applied: sending unfolded");
+        ctx.ui.setStatus(
+          "infinite-context",
+          "folds not applied: sending unfolded",
+        );
         ctx.ui.notify(
-          unappliedFoldsNotice((error as Error).message, ctx.sessionManager.getSessionFile()),
+          unappliedFoldsNotice(
+            (error as Error).message,
+            ctx.sessionManager.getSessionFile(),
+          ),
           "error",
         );
         ctx.abort();
         return { messages: stoppedRequest(Date.now()) };
       }
       // Without folds, the untouched request is exactly what folding would send.
-      if (error === stateError || error instanceof ProjectionMismatchError) return;
+      if (error === stateError || error instanceof ProjectionMismatchError)
+        return;
       throw error;
     }
   });
@@ -238,8 +273,17 @@ export default function infiniteContext(pi: ExtensionAPI) {
     // A turn that folded reports the usage of its pre-fold request, so its token count is stale
     // until the next response; skipping it keeps a reminder from firing right after a fold.
     const folded = event.toolResults.some((r) => r.toolName === "context_fold");
-    const continuing = message.stopReason === "toolUse" && event.toolResults.length > 0 && !folded;
-    const planned = planNudge(tokens, window, settings, lastNudgedBand, continuing);
+    const continuing =
+      message.stopReason === "toolUse" &&
+      event.toolResults.length > 0 &&
+      !folded;
+    const planned = planNudge(
+      tokens,
+      window,
+      settings,
+      lastNudgedBand,
+      continuing,
+    );
     lastNudgedBand = planned.band;
     if (!planned.nudge) return;
     pi.sendMessage(
@@ -252,7 +296,12 @@ export default function infiniteContext(pi: ExtensionAPI) {
           `A fold pays off when one context_fold call frees ~${fmtTokens(Math.round(tokens * FOLD_MIN_SHARE))} tokens or more. ` +
           "Decide whether to fold now, following the instructions that mention context_fold.",
         display: true,
-        details: { band: planned.band, tokens, window, ...nudgeSchedule(window, settings) },
+        details: {
+          band: planned.band,
+          tokens,
+          window,
+          ...nudgeSchedule(window, settings),
+        },
       },
       { deliverAs: "steer" },
     );
@@ -266,7 +315,9 @@ export default function infiniteContext(pi: ExtensionAPI) {
       "`[#id] <role> ~<tokens> · <preview>` per message, `[#id] fold <N> msgs ~<tokens> · <summary preview>` per fold, " +
       "`not live` instead of tokens when Pi omits it from context. Previews shrink when needed so every item is listed; it never recursively dumps a subtree.",
     parameters: Type.Object({
-      id: Type.Optional(IdParam("Fold id whose direct children to list. Omit for the roots.")),
+      id: Type.Optional(
+        IdParam("Fold id whose direct children to list. Omit for the roots."),
+      ),
     }),
     executionMode: "sequential",
     async execute(_callId, params, _signal, _update, ctx) {
@@ -276,7 +327,11 @@ export default function infiniteContext(pi: ExtensionAPI) {
       const map = renderMap(listing.label, listing.items, state.byId);
       return {
         content: [{ type: "text", text: map.text }],
-        details: { count: listing.items.length, previewChars: map.previewChars, id },
+        details: {
+          count: listing.items.length,
+          previewChars: map.previewChars,
+          id,
+        },
       };
     },
   });
@@ -288,7 +343,9 @@ export default function infiniteContext(pi: ExtensionAPI) {
       `Read one original message's serialized text or exactly one fold's summary without changing context. ` +
       `Uses 1-based line windows (default ${DEFAULT_PAGE_LIMIT}); every result reports total item lines. The item is returned whole — it already fit in context once — so page with offset/limit to bound what you pull back.`,
     parameters: Type.Object({
-      id: IdParam("Stable message or fold id from context_map or context_search."),
+      id: IdParam(
+        "Stable message or fold id from context_map or context_search.",
+      ),
       ...PageParams,
     }),
     executionMode: "sequential",
@@ -298,15 +355,33 @@ export default function infiniteContext(pi: ExtensionAPI) {
       const item = findItem(state.roots, id);
       if (!item) throw unknownIdError(id);
       const page = parsePage(params.offset, params.limit);
-      const text = item.kind === "fold" ? item.summary : serializeMessage(state.byId.get(item.id)!.message);
+      const text =
+        item.kind === "fold"
+          ? item.summary
+          : serializeMessage(state.byId.get(item.id)!.message);
       const window = lineWindow(text, page.offset, page.limit);
-      const kind = item.kind === "fold" ? "fold summary" : state.byId.get(item.id)!.message.role;
-      const range = window.end >= window.start ? `${window.start}-${window.end}` : "none";
+      const kind =
+        item.kind === "fold"
+          ? "fold summary"
+          : state.byId.get(item.id)!.message.role;
+      const range =
+        window.end >= window.start ? `${window.start}-${window.end}` : "none";
       const footer = `[#${id}] ${kind} · lines ${range} of ${window.totalLines}`;
       // No boundOutput here: peek deliberately returns one already-context-sized item in full.
       return {
-        content: [{ type: "text", text: `${window.text}${window.text ? "\n" : ""}${footer}` }],
-        details: { id, kind, totalLines: window.totalLines, start: window.start, end: window.end },
+        content: [
+          {
+            type: "text",
+            text: `${window.text}${window.text ? "\n" : ""}${footer}`,
+          },
+        ],
+        details: {
+          id,
+          kind,
+          totalLines: window.totalLines,
+          start: window.start,
+          end: window.end,
+        },
       };
     },
   });
@@ -316,12 +391,21 @@ export default function infiniteContext(pi: ExtensionAPI) {
     label: "Context search",
     description:
       `Case-insensitive JavaScript regex search over every current-branch original and every reachable fold summary, once each. ` +
-      `Returns stable ids and 1-based lines. Each pattern emits at most ${SEARCH_MATCHES_PER_ITEM} lines per item and ${SEARCH_MATCHES_PER_PATTERN} lines overall.`,
+      `Returns stable ids and 1-based lines. Each pattern emits at most ${SEARCH_MATCHES_PER_ITEM} lines per item and ${SEARCH_MATCHES_PER_PATTERN} lines overall.` +
+      `Use when the user seems to refer to something that you don't have in context, it might available be in folded history.`,
     parameters: Type.Object({
-      patterns: Type.Array(Type.String({ description: "JavaScript regular expression; empty patterns are rejected.", minLength: 1, maxLength: MAX_PATTERN_LENGTH }), {
-        minItems: 1,
-        maxItems: 20,
-      }),
+      patterns: Type.Array(
+        Type.String({
+          description:
+            "JavaScript regular expression; empty patterns are rejected.",
+          minLength: 1,
+          maxLength: MAX_PATTERN_LENGTH,
+        }),
+        {
+          minItems: 1,
+          maxItems: 20,
+        },
+      ),
     }),
     executionMode: "sequential",
     async execute(_callId, params, _signal, _update, ctx) {
@@ -335,7 +419,10 @@ export default function infiniteContext(pi: ExtensionAPI) {
             `Pattern ${index + 1} is not a valid JavaScript regular expression: /${previewText(source)}/`,
           );
         }
-        return { source, result: searchArchive(state.originals, state.roots, pattern) };
+        return {
+          source,
+          result: searchArchive(state.originals, state.roots, pattern),
+        };
       });
       const rendered = groups.map(({ source, result }) => {
         if (!result.totalMatchingLines) return `No hits for /${source}/.`;
@@ -347,14 +434,26 @@ export default function infiniteContext(pi: ExtensionAPI) {
             `[#${hit.id}] ${hit.role}${hit.parentFoldId ? ` · child of [#${hit.parentFoldId}]` : " · root"}`,
             ...hit.matches.map((match) => `${match.line}: ${match.text}`),
           );
-          if (hit.omittedMatches) lines.push(`… ${hit.omittedMatches} more matching lines in this item`);
+          if (hit.omittedMatches)
+            lines.push(
+              `… ${hit.omittedMatches} more matching lines in this item`,
+            );
         }
-        if (result.capped) lines.push(`… capped at ${SEARCH_MATCHES_PER_PATTERN} emitted lines; refine the pattern`);
+        if (result.capped)
+          lines.push(
+            `… capped at ${SEARCH_MATCHES_PER_PATTERN} emitted lines; refine the pattern`,
+          );
         return lines.join("\n");
       });
       return {
         content: [{ type: "text", text: boundOutput(rendered.join("\n\n")) }],
-        details: { patterns: params.patterns, matches: groups.reduce((n, group) => n + group.result.totalMatchingLines, 0) },
+        details: {
+          patterns: params.patterns,
+          matches: groups.reduce(
+            (n, group) => n + group.result.totalMatchingLines,
+            0,
+          ),
+        },
       };
     },
   });
@@ -364,7 +463,8 @@ export default function infiniteContext(pi: ExtensionAPI) {
     label: "Context fold",
     description:
       "Wrap contiguous root ranges in new folds. Each explicit summary is the new fold's projection; existing folds become children unchanged. Refold a single root fold to revise its active summary while preserving history. The batch is all-or-nothing and tool calls/results remain indivisible.",
-    promptSnippet: "Fold context that later work no longer needs into a searchable archive",
+    promptSnippet:
+      "Fold context that later work no longer needs into a searchable archive",
     promptGuidelines: [
       `Use context_fold on roots that later work no longer needs, batched so one call frees ~${FOLD_MIN_SHARE * 100}% of the context or more: every kept token is re-read on every later turn, while a fold costs about ten re-reads of the whole context (the folding turns plus rewriting the cached prompt prefix), which smaller folds rarely repay. Delay a fold when there is a good reason, such as the task ending within a few turns.`,
       "Keep the thread as roots: governing instructions, the active request, open decisions, unresolved errors, and material in active use. Native compaction is blocked and an overflow fails the turn, so when little room is left, use context_fold regardless, including parts of the thread: restate them in the summary; context_peek recovers details.",
@@ -376,9 +476,15 @@ export default function infiniteContext(pi: ExtensionAPI) {
         Type.Object({
           from: IdParam("First root id."),
           to: Type.Optional(IdParam("Inclusive root id; defaults to from.")),
-          summary: SummaryParam("Exact new fold summary; an empty string is allowed."),
+          summary: SummaryParam(
+            "Exact new fold summary; an empty string is allowed.",
+          ),
         }),
-        { minItems: 1, maxItems: 50, description: "Disjoint root ranges; the mutation is atomic." },
+        {
+          minItems: 1,
+          maxItems: 50,
+          description: "Disjoint root ranges; the mutation is atomic.",
+        },
       ),
     }),
     executionMode: "sequential",
@@ -404,9 +510,19 @@ export default function infiniteContext(pi: ExtensionAPI) {
       const after = visibleTokens(next, state.byId);
       persist(next);
       const delta = after - before;
-      const effect = delta < 0 ? `freed ~${fmtTokens(-delta)} tokens` : delta > 0 ? `added ~${fmtTokens(delta)} tokens` : "no estimated context change";
+      const effect =
+        delta < 0
+          ? `freed ~${fmtTokens(-delta)} tokens`
+          : delta > 0
+            ? `added ~${fmtTokens(delta)} tokens`
+            : "no estimated context change";
       return {
-        content: [{ type: "text", text: `Created ${ids.length} fold${ids.length === 1 ? "" : "s"}: ${ids.map((id) => `[#${id}]`).join(", ")} · ${effect}` }],
+        content: [
+          {
+            type: "text",
+            text: `Created ${ids.length} fold${ids.length === 1 ? "" : "s"}: ${ids.map((id) => `[#${id}]`).join(", ")} · ${effect}`,
+          },
+        ],
         details: { ids, deltaTokens: delta },
       };
     },
