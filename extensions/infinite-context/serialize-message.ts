@@ -1,6 +1,10 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
-/** Authoritative text projection shared by lookup and search. Binary image bytes stay in the session source. */
+/**
+ * Authoritative text projection shared by lookup and search. Binary image bytes stay in the session source.
+ * Assistant thinking is left out: decisions and facts that later work needs are in the visible text, the
+ * tool calls and their results, and thinking would only add tokens to peeks and noise to search hits.
+ */
 export function serializeMessage(message: AgentMessage): string {
   if (message.role === "branchSummary" || message.role === "compactionSummary")
     return message.summary;
@@ -19,7 +23,6 @@ export function serializeMessage(message: AgentMessage): string {
   const parts: string[] = [];
   for (const block of message.content) {
     if (block.type === "text") parts.push(block.text);
-    else if (block.type === "thinking") parts.push(`(thinking) ${block.thinking}`);
     else if (block.type === "toolCall")
       parts.push(`(call ${block.name} ${JSON.stringify(block.arguments)})`);
     else if (block.type === "image")

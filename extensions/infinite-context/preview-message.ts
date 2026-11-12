@@ -4,8 +4,8 @@ import { serializeMessage } from "./serialize-message.ts";
 /**
  * Compact text a map preview is cut from. Separate from the authoritative
  * serializeMessage (peek and search) because a map preview only has a few
- * characters to identify a message: assistant thinking is dropped and a tool
- * call shows its name and bare argument values instead of JSON syntax.
+ * characters to identify a message: a tool call shows its name and bare
+ * argument values instead of JSON syntax.
  */
 export function previewMessage(message: AgentMessage): string {
   if (message.role !== "assistant") return serializeMessage(message);

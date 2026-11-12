@@ -18,6 +18,6 @@ test("serializer labels binary images honestly and preserves stable lines", () =
       { type: "thinking", thinking: "private reasoning" },
       { type: "text", text: "answer" },
     ])),
-    "(thinking) private reasoning\nanswer",
+    "answer",
   );
 });
