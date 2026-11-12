@@ -60,7 +60,7 @@ test("unknown and non-root endpoints name the id and the way out", () => {
   );
   assert.throws(
     () => planRootRanges(roots, originals, [{ from: "nope", to: "nope", summary: "" }]),
-    /"nope" is not a root\. Call context_map/,
+    /"nope" is not in the archive on this branch\. Call context_map/,
   );
   assert.throws(
     () => planRootRanges(roots, originals, [{ from: "r2", to: "r2", summary: "" }]),

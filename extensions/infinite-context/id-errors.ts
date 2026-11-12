@@ -18,9 +18,13 @@ export function unknownIdError(id: string): Error {
   );
 }
 
+/**
+ * An id that is neither a root nor archived is usually a miscopied id, so the
+ * error says it does not exist rather than suggesting it exists elsewhere.
+ */
 export function notARootError(roots: Forest, id: string): Error {
   const fold = containingFold(roots, id);
   if (fold)
     return new Error(`"${id}" is not a root: it is inside fold "${fold.id}". Fold "${fold.id}" instead.`);
-  return new Error(`"${id}" is not a root. Call context_map for the current root ids.`);
+  return unknownIdError(id);
 }
