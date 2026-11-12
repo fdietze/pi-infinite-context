@@ -293,14 +293,28 @@ export default function infiniteContext(pi: ExtensionAPI) {
     );
     lastNudgedBand = planned.band;
     if (!planned.nudge) return;
+    // The fold size is given in the extension's own estimate, the unit of context_map and the
+    // context_fold result, so the agent compares like with like: provider tokenizers count up to
+    // ~1.9x more than the estimate (Claude), which would make folds twice as large as needed.
+    // Without a readable archive the provider count is the next best basis; the context handler
+    // reports that failure. The system prompt is added in the same chars/4 unit because
+    // FOLD_MIN_SHARE is a share of the whole provider context; tool schemas are left out as they
+    // are small next to it.
+    let estimated = tokens;
+    try {
+      const state = current(ctx);
+      estimated =
+        visibleTokens(state.roots, state.byId) +
+        Math.ceil(ctx.getSystemPrompt().length / 4);
+    } catch {}
     pi.sendMessage(
       {
         customType: "infinite-context/nudge",
         content:
           // The decision rules live in the context_fold promptGuidelines below; the reminder only
           // adds the current numbers, with the fold size derived from the same FOLD_MIN_SHARE (DRY).
-          `Context reminder: ~${fmtTokens(tokens)} tokens in context (${Math.round(percent)}% of the window, ~${fmtTokens(Math.max(0, window - tokens))} left). ` +
-          `A fold pays off when one context_fold call frees ~${fmtTokens(Math.round(tokens * FOLD_MIN_SHARE))} tokens or more. ` +
+          `Context reminder: ~${fmtTokens(tokens)} tokens in context (${Math.round(percent)}% of the window, ~${fmtTokens(Math.max(0, window - tokens))} left), ~${fmtTokens(estimated)} as context_map counts them. ` +
+          `A fold pays off when one context_fold call frees ~${fmtTokens(Math.round(estimated * FOLD_MIN_SHARE))} of those or more. ` +
           "Decide whether to fold now, following the instructions that mention context_fold.",
         display: true,
         details: {

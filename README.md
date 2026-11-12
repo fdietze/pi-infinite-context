@@ -29,7 +29,7 @@ Map and search results provide the IDs to read next.
 
 ## Context reminders
 
-From **150k tokens or 75% of the window** (whichever comes first), the extension reminds the agent to fold while it works with tools. The reminder says how many tokens a fold should free: about 30% of the context ([why](#when-a-fold-pays-off)). If the agent does not fold, it reminds again after another 15k tokens. In practice it folds at the first reminder 77% of the time. Reminders never fold anything themselves.
+From **150k tokens or 75% of the window** (whichever comes first), the extension reminds the agent to fold while it works with tools. The reminder says how many tokens a fold should free: about 35% of the context ([why](#when-a-fold-pays-off)), counted like the map counts them. If the agent does not fold, it reminds again after another 15k tokens. In practice it folds at the first reminder 77% of the time. Reminders never fold anything themselves.
 
 ![Cost per prompt of 67 sessions, each with a random reminder limit between 100k and 300k tokens, in four bars of 50k. All bars are close to 1 and their whiskers overlap.](docs/reminder-limit.png)
 
@@ -60,6 +60,6 @@ Providers cache the start of a prompt, and cached tokens cost about a tenth of u
 
 ![Dollars saved per dollar spent for each fold, against the share of context it freed, on a log scale. The line for all folds rises from about 0.2 below 20% freed, crosses 1 between 20% and 30%, and reaches about 14 at 70-80%.](docs/fold-payoff.png)
 
-Each dot is one fold. The further right, the more of the context it freed. The higher, the more dollars it saved per dollar it cost. The line shows all folds together, and above the dashed line a fold paid off. Folds that free less than 20% lose money. From 30%, folds pay off on average, because a few dozen requests usually follow. At 70–80%, they return about 14×. So the reminder asks for about 30%.
+Each dot is one fold. The further right, the more of the context it freed. The higher, the more dollars it saved per dollar it cost. The line shows all folds together, and above the dashed line a fold paid off. Folds that free less than 20% lose money. From 30%, folds pay off on average, because a few dozen requests usually follow. At 70–80%, they return about 14×. The chart measures what a fold frees after its own overhead: the map and the summary take about 5% of the context. So the reminder asks for about 35%.
 
 Both charts use the author's sessions with Claude and GPT models: the last 90 days for folds, and since 2026-10-26 for the limit experiment. They measure cost only, not the quality of the agent's work. They come from [context-efficiency](https://github.com/fdietze/context-efficiency).

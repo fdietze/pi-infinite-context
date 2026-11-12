@@ -97,6 +97,8 @@ function harness(initial: SessionEntry[]) {
       aborts++;
     },
     getContextUsage: () => usage,
+    // 40k characters estimate to 10k tokens.
+    getSystemPrompt: () => "s".repeat(40_000),
   } as unknown as ExtensionContext;
   infiniteContext(pi);
   return {
@@ -219,7 +221,9 @@ test("a model override applies from the model switch on and restarts the reminde
 });
 
 test("a reminder names the fold size that pays off and skips the stale usage of a folding turn", async () => {
-  const h = harness([entry("u1", "user", "one", 1)]);
+  // 360k characters of messages plus the harness's 40k-character system prompt estimate to
+  // 100k tokens, the unit context_map shows; the provider counts more.
+  const h = harness([entry("u1", "user", "x".repeat(360_000), 1)]);
   await h.emit("session_start");
   h.setUsage({ contextWindow: 1_000_000, tokens: 200_000 });
   const turn = (toolName: string) =>
@@ -230,7 +234,7 @@ test("a reminder names the fold size that pays off and skips the stale usage of 
 
   await turn("bash");
   assert.equal(h.sent.length, 1);
-  assert.match(h.sent[0], /frees ~60k tokens or more/);
+  assert.match(h.sent[0], /~100k as context_map counts them\. A fold pays off when one context_fold call frees ~35k of those or more/);
 });
 
 test("registers the approved four-tool surface in sequential mode", () => {
