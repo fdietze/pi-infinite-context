@@ -33,7 +33,7 @@ Use simple, accurate English and keep both documents very concise.
 - `extensions/infinite-context/search.ts`: pure archive regex search.
 - `extensions/infinite-context/output.ts`: line windows, token formatting, and global output limits.
 - `extensions/infinite-context/nudge.ts`: proactive folding threshold and reminder-step policy.
-- `extensions/infinite-context/settings.ts`: parser for `<agent dir>/infinite-context/settings.json` (nudge limits), the per-branch limit (fixed or drawn from a range), and the session entry that records it.
+- `extensions/infinite-context/settings.ts`: parser for `<agent dir>/infinite-context/settings.json` (nudge limits, per-model overrides), the per-branch limit (fixed or drawn from a range), and the session entry that records it.
 - `extensions/infinite-context/*.test.ts`: unit, property, and integration tests.
 - `e2e/`: end-to-end test driving the real `pi` binary with a scripted fake provider.
 

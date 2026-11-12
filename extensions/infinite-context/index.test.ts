@@ -177,6 +177,47 @@ test("a token range assigns each branch one recorded limit that survives reloads
   assert.deepEqual(recorded()[0].nudgeAtTokensRange, [100_000, 250_000]);
 });
 
+test("a model override applies from the model switch on and restarts the reminders", async () => {
+  const file = path.join(process.env.PI_CODING_AGENT_DIR!, "infinite-context", "settings.json");
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(
+    file,
+    JSON.stringify({
+      nudgeAtTokens: [100_000, 300_000],
+      modelOverrides: { "local/small": { nudgeAtTokens: 60_000 } },
+    }),
+  );
+  const h = harness([entry("u1", "user", "one", 1)]); // reads the file when created
+  rmSync(file);
+  const limits = () =>
+    h.entries().flatMap((e) =>
+      e.type === "custom" && e.customType === "infinite-context:settings"
+        ? [(e.data as Settings).nudgeAtTokens]
+        : [],
+    );
+  const big = { provider: "anthropic", id: "big" };
+  const small = { provider: "local", id: "small" };
+  Object.assign(h.ctx, { model: big });
+  await h.emit("session_start");
+  h.setUsage({ contextWindow: 1_000_000, tokens: 70_000 });
+  const turn = () =>
+    h.emit("turn_end", { message: { stopReason: "toolUse" }, toolResults: [{ toolName: "bash" }] });
+  await turn();
+  assert.deepEqual(h.sent, []);
+
+  await h.emit("model_select", { model: small });
+  await h.emit("model_select", { model: small });
+  const [drawn] = limits();
+  assert.ok(drawn >= 100_000 && drawn <= 300_000);
+  assert.deepEqual(limits(), [drawn, 60_000]);
+  await turn();
+  assert.equal(h.sent.length, 1);
+
+  // Switching back keeps the branch's drawn limit, so the branch stays in one experiment arm.
+  await h.emit("model_select", { model: big });
+  assert.deepEqual(limits(), [drawn, 60_000, drawn]);
+});
+
 test("a reminder names the fold size that pays off and skips the stale usage of a folding turn", async () => {
   const h = harness([entry("u1", "user", "one", 1)]);
   await h.emit("session_start");

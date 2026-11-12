@@ -43,6 +43,15 @@ Change the limits in `~/.pi/agent/infinite-context/settings.json` and restart Pi
 
 `nudgeAtTokens` can also be a range like `[100000, 300000]`. Each session then draws its own limit, which is how the experiment above works. Sessions record their limits and reminders, so tools like [context-efficiency](https://github.com/fdietze/context-efficiency) can analyze them.
 
+Models can have their own limits, keyed by exact `provider/id` like Pi's `compaction.modelOverrides`. Each field falls back to the top-level value, then to the default:
+
+```json
+{
+  "nudgeAtTokens": 150000,
+  "modelOverrides": { "llama-cpp/qwen3.8-27b": { "nudgeAtTokens": 60000 } }
+}
+```
+
 Pi's own compaction, including `/compact`, is blocked. If the agent does not fold enough, the context can still overflow.
 
 ## When a fold pays off

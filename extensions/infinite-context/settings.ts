@@ -5,6 +5,10 @@
  * Both fields only tune when a reminder appears, so each one is fail-open on its own:
  * a missing or nonsensical value falls back to its default and a partial file still works
  * (KISS — refusing to run over a typo'd number helps nobody). Nothing here grants authority.
+ *
+ * `modelOverrides` maps an exact "provider/id" key to its own fields, the convention of Pi's
+ * `compaction.modelOverrides` (Pi docs/compaction.md): each field falls back on its own from
+ * the override to the top-level value to the default.
  */
 
 /**
@@ -17,7 +21,7 @@ export const SETTINGS_ENTRY = "infinite-context:settings";
 /** Inclusive token bounds [min, max] with min < max. */
 export type TokenRange = readonly [number, number];
 
-/** The settings file: a fixed token limit, or a range to draw one per branch from. */
+/** The settings file for one model: a fixed token limit, or a range to draw one per branch from. */
 export interface FileSettings {
   readonly nudgeAtTokens: number | TokenRange;
   readonly nudgeAtPercent: number;
@@ -47,38 +51,58 @@ export const DEFAULT_SETTINGS: Settings = {
 };
 
 /** A token count is a whole, positive number. */
-function positiveInt(value: unknown, fallback: number): number {
-  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : fallback;
+function positiveInt(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
 }
 
 /** Two positive whole token counts, the first smaller. */
 function tokenRange(value: unknown): TokenRange | undefined {
   if (!Array.isArray(value) || value.length !== 2) return undefined;
-  const [min, max] = value.map((bound) => positiveInt(bound, 0));
+  const [min, max] = value.map((bound) => positiveInt(bound) ?? 0);
   return min > 0 && min < max ? [min, max] : undefined;
 }
 
 /** A window share above 100% could never be reached, so the range is (0, 100]. */
-function percent(value: unknown, fallback: number): number {
+function percent(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value > 0 && value <= 100
     ? value
-    : fallback;
+    : undefined;
 }
 
-/** Parses the settings file's contents; unparseable text is treated as an empty file. */
-export function parseSettings(json: string): FileSettings {
-  let value: Record<string, unknown> | undefined;
+/** A JSON object; arrays and null are not. */
+function object(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * Parses the settings file's contents for `model` ("provider/id", or undefined when no model
+ * is selected); unparseable text is treated as an empty file.
+ */
+export function parseSettings(json: string, model?: string): FileSettings {
+  let file: Record<string, unknown> | undefined;
   try {
-    const parsed: unknown = JSON.parse(json);
-    if (typeof parsed === "object" && parsed !== null) value = parsed as Record<string, unknown>;
+    file = object(JSON.parse(json));
   } catch {
     // Fall through to defaults; the file is the user's, not a contract we can repair.
   }
+  const overrides = object(file?.modelOverrides);
+  // Object.hasOwn keeps keys like "constructor" from resolving to Object.prototype members.
+  const override =
+    model !== undefined && overrides !== undefined && Object.hasOwn(overrides, model)
+      ? object(overrides[model])
+      : undefined;
+  const tokens = (value: unknown) => tokenRange(value) ?? positiveInt(value);
   return {
     nudgeAtTokens:
-      tokenRange(value?.nudgeAtTokens) ??
-      positiveInt(value?.nudgeAtTokens, DEFAULT_SETTINGS.nudgeAtTokens),
-    nudgeAtPercent: percent(value?.nudgeAtPercent, DEFAULT_SETTINGS.nudgeAtPercent),
+      tokens(override?.nudgeAtTokens) ??
+      tokens(file?.nudgeAtTokens) ??
+      DEFAULT_SETTINGS.nudgeAtTokens,
+    nudgeAtPercent:
+      percent(override?.nudgeAtPercent) ??
+      percent(file?.nudgeAtPercent) ??
+      DEFAULT_SETTINGS.nudgeAtPercent,
   };
 }
 
@@ -88,28 +112,30 @@ const sameRange = (a: unknown, b: TokenRange | undefined): boolean =>
 /**
  * The settings a branch runs under. A fixed limit is used as is. A range assigns the branch
  * one limit drawn uniformly from it (a randomized experiment, unit = branch): the branch keeps
- * the limit its latest record (`recorded`, untrusted session data) holds for the same range,
- * so resuming, reloading and forking stay in the same arm; otherwise `random` (in [0, 1))
- * draws a new one. A changed range starts a new draw, so edited settings still apply.
+ * the limit of its latest record for the same range (`recorded`: the data of the branch's
+ * settings entries in order, untrusted session data), so resuming, reloading, forking and
+ * switching models back and forth stay in the same arm; otherwise `random` (in [0, 1)) draws
+ * a new one. A range without a record starts a new draw, so edited settings still apply.
  */
 export function resolveSettings(
   file: FileSettings,
-  recorded: unknown,
+  recorded: readonly unknown[],
   random: () => number,
 ): Settings {
   const { nudgeAtTokens, nudgeAtPercent } = file;
   if (typeof nudgeAtTokens === "number") return { nudgeAtTokens, nudgeAtPercent };
   const [min, max] = nudgeAtTokens;
-  const data = (typeof recorded === "object" && recorded !== null ? recorded : {}) as Record<
-    string,
-    unknown
-  >;
-  const kept = data.nudgeAtTokens;
-  const drawn =
-    sameRange(data.nudgeAtTokensRange, nudgeAtTokens) &&
-    typeof kept === "number" && Number.isInteger(kept) && kept >= min && kept <= max
-      ? kept
-      : min + Math.floor(random() * (max - min + 1));
+  const keeps = (record: unknown) => {
+    if (typeof record !== "object" || record === null) return false;
+    const data = record as Record<string, unknown>;
+    const kept = data.nudgeAtTokens;
+    return (
+      sameRange(data.nudgeAtTokensRange, nudgeAtTokens) &&
+      typeof kept === "number" && Number.isInteger(kept) && kept >= min && kept <= max
+    );
+  };
+  const record = recorded.filter(keeps).at(-1) as { nudgeAtTokens: number } | undefined;
+  const drawn = record?.nudgeAtTokens ?? min + Math.floor(random() * (max - min + 1));
   return { nudgeAtTokens: drawn, nudgeAtPercent, nudgeAtTokensRange: nudgeAtTokens };
 }
 

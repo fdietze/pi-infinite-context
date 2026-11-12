@@ -35,7 +35,6 @@ import { validateToolUnitOwnership } from "./tool-units.ts";
 import { FOLD_MIN_SHARE, nudgeSchedule, planNudge } from "./nudge.ts";
 import {
   DEFAULT_SETTINGS,
-  type FileSettings,
   SETTINGS_ENTRY,
   type Settings,
   parseSettings,
@@ -98,19 +97,20 @@ function previewText(text: string): string {
 /**
  * Read this extension's settings next to pi's own agent config (getAgentDir() honors pi's
  * agent-dir override). A missing or unreadable file is the same as an empty one; parseSettings
- * decides what that means per field. Read once per load: changes apply after restart or /reload.
+ * decides what that means per field and model. Read once per load: changes apply after restart
+ * or /reload.
  */
-function readSettings(): FileSettings {
+function readSettingsFile(): string {
   const file = path.join(getAgentDir(), "infinite-context", "settings.json");
   try {
-    return parseSettings(fs.readFileSync(file, "utf8"));
+    return fs.readFileSync(file, "utf8");
   } catch {
-    return parseSettings("");
+    return "";
   }
 }
 
 export default function infiniteContext(pi: ExtensionAPI) {
-  const fileSettings = readSettings();
+  const settingsFile = readSettingsFile();
   let roots: Forest = [];
   let stateError: Error | undefined;
   let loaded = false;
@@ -162,22 +162,23 @@ export default function infiniteContext(pi: ExtensionAPI) {
       roots = [];
       ctx.ui.notify(`infinite-context: ${stateError.message}`, "error");
     }
-    resolveBranchSettings(ctx);
+    resolveBranchSettings(ctx, ctx.model);
+    lastNudgedBand = 0;
   };
 
   // Every branch states the settings it ran under, so cost and token analyses of a session
   // can be tied to its nudge limits. Appended only when the branch's latest record differs,
   // which also captures a settings change after /reload. The record also keeps a drawn limit
-  // stable for the branch (resolveSettings).
-  const resolveBranchSettings = (ctx: ExtensionContext) => {
-    let recorded: unknown;
-    for (const entry of branch(ctx))
-      if (entry.type === "custom" && entry.customType === SETTINGS_ENTRY)
-        recorded = entry.data;
-    settings = resolveSettings(fileSettings, recorded, Math.random);
-    lastNudgedBand = 0;
-    if (settingsChanged(recorded, settings))
-      pi.appendEntry(SETTINGS_ENTRY, settings);
+  // stable for the branch (resolveSettings). Returns whether the settings changed.
+  const resolveBranchSettings = (ctx: ExtensionContext, model: { provider: string; id: string } | undefined) => {
+    const recorded = branch(ctx).flatMap((entry) =>
+      entry.type === "custom" && entry.customType === SETTINGS_ENTRY ? [entry.data] : [],
+    );
+    const file = parseSettings(settingsFile, model && `${model.provider}/${model.id}`);
+    settings = resolveSettings(file, recorded, Math.random);
+    const changed = settingsChanged(recorded.at(-1), settings);
+    if (changed) pi.appendEntry(SETTINGS_ENTRY, settings);
+    return changed;
   };
 
   const current = (ctx: ExtensionContext) => {
@@ -211,6 +212,12 @@ export default function infiniteContext(pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => load(ctx));
   pi.on("session_tree", async (_event, ctx) => load(ctx));
+  // A model can have its own limits (settings.ts modelOverrides). Before the first load there is
+  // nothing to update: load() resolves the settings for the then-current model. Reminder bands
+  // count from the threshold, so new limits start the reminder schedule over.
+  pi.on("model_select", async (event, ctx) => {
+    if (loaded && resolveBranchSettings(ctx, event.model)) lastNudgedBand = 0;
+  });
 
   pi.on("context", async (event, ctx) => {
     try {
