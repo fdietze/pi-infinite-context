@@ -277,7 +277,7 @@ test("fold persists v2, overlays one summary, and reloads its own snapshot", asy
   assert.equal(overlay.messages.length, 1);
   assert.equal(
     overlay.messages[0].role === "user" && overlay.messages[0].content,
-    `[#${(result.details as { ids: string[] }).ids[0]}] archived fold summary:\nboth`,
+    `${(result.details as { ids: string[] }).ids[0]} archived fold summary:\nboth`,
   );
 
   await h.emit("session_start", { reason: "reload" });
@@ -316,15 +316,15 @@ test("from-only refolding revises active context and keeps readable, searchable 
   await h.emit("session_start", { reason: "reload" });
   const entriesBeforeReads = structuredClone(h.entries());
   const peek = await call("context_peek", { id: oldId });
-  assert.equal(peek.content[0].text, `previous history\n[#${oldId}] fold summary · lines 1-1 of 1`);
+  assert.equal(peek.content[0].text, `previous history\n${oldId} fold summary · lines 1-1 of 1`);
   const innerPeek = await call("context_peek", { id: innerId });
   assert.match(innerPeek.content[0].text, /^inner history\n/);
   const search = await call("context_search", { patterns: ["previous history"] });
   assert.equal((search.details as { matches: number }).matches, 1);
-  assert.ok(search.content[0].text.includes(`[#${oldId}] fold summary · child of [#${newId}]`));
+  assert.ok(search.content[0].text.includes(`${oldId} fold summary · child of ${newId}`));
   assert.match(search.content[0].text, /1: previous history/);
   const children = await call("context_map", { id: newId });
-  assert.ok(children.content[0].text.includes(`[#${oldId}]`));
+  assert.match(children.content[0].text, new RegExp(`^${oldId} fold `, "m"));
   assert.match(children.content[0].text, /previous history/);
 
   const overlay = await h.emit("context", {
@@ -333,7 +333,7 @@ test("from-only refolding revises active context and keeps readable, searchable 
   assert.equal(overlay.messages.length, 1);
   assert.equal(
     overlay.messages[0].role === "user" && overlay.messages[0].content,
-    `[#${newId}] archived fold summary:\ncurrent state`,
+    `${newId} archived fold summary:\ncurrent state`,
   );
   assert.deepEqual(h.entries(), entriesBeforeReads);
 });
@@ -352,13 +352,13 @@ test("new originals append after a fold; tree navigation reconstructs branch-loc
   h.setEntries([...h.entries(), entry("u3", "user", "new", 3)]);
   const map = await h.tools.get("context_map")!.execute("map", {}, undefined, undefined, h.ctx);
   assert.match(map.content[0].text, /old/);
-  assert.match(map.content[0].text, /\[#u3\]/);
+  assert.match(map.content[0].text, /^u3 user /m);
 
   h.setEntries([source[0]]);
   await h.emit("session_tree", { newLeafId: "u1" });
   const branchMap = await h.tools.get("context_map")!.execute("map", {}, undefined, undefined, h.ctx);
   assert.doesNotMatch(branchMap.content[0].text, /old/);
-  assert.match(branchMap.content[0].text, /\[#u1\]/);
+  assert.match(branchMap.content[0].text, /^u1 user /m);
 });
 
 test("folding only excluded bash reports the actual zero provider-context delta", async () => {
@@ -439,6 +439,14 @@ test("reload rejects a split tool unit and accepts a folded abandoned call", asy
   ]);
   await split.emit("session_start");
   assert.match(split.notifications[0], /splits the tool call of "a1"/);
+
+  // context_map lists the unit as one call line; context_peek on the call id reads call and result.
+  const unit = harness([assistant, result]);
+  await unit.emit("session_start");
+  const map = await unit.tools.get("context_map")!.execute("map", {}, undefined, undefined, unit.ctx);
+  assert.match(map.content[0].text, /^a1 call \S+ read\nroots: 1 items$/);
+  const peek = await unit.tools.get("context_peek")!.execute("peek", { id: "a1" }, undefined, undefined, unit.ctx);
+  assert.equal(peek.content[0].text, '(call read {})\n(result read)\ndone\na1 call · lines 1-3 of 3');
 
   // An abandoned call is a complete unit: a snapshot folding it stays loadable.
   const abandoned = harness([

@@ -33,12 +33,13 @@ const script: Step[] = [
 function mapRootIds(messages: readonly any[]): string[] {
   for (let i = messages.length - 1; i >= 0; --i) {
     const message = messages[i];
-    if (message.role !== "toolResult") continue;
+    if (message.role !== "toolResult" || message.toolName !== "context_map") continue;
     const text = (Array.isArray(message.content) ? message.content : [])
       .filter((block: any) => block.type === "text")
       .map((block: any) => block.text)
       .join("\n");
-    const ids = [...text.matchAll(/\[#([\w-]+)\]/g)].map((match) => match[1]);
+    // Every line but the closing count starts with an id.
+    const ids = text.split("\n").slice(0, -1).map((line: string) => line.split(" ")[0]);
     if (ids.length) return ids;
   }
   return [];
@@ -106,8 +107,8 @@ export default function scriptedProvider(pi: any) {
         if (current.kind === "fold") {
           const ids = mapRootIds(context.messages);
           call("context_fold", {
-            // Everything except the running turn, including the abandoned attempt.
-            items: [{ from: ids[0], to: ids[Math.max(ids.length - 2, 0)], summary: FOLD_SUMMARY }],
+            // Everything the map lists: all but the running turn, including the abandoned attempt.
+            items: [{ from: ids[0], to: ids.at(-1), summary: FOLD_SUMMARY }],
           });
         }
         if (current.kind === "refold") {

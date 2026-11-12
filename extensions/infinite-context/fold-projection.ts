@@ -21,11 +21,11 @@ export function anchorId(item: Item, byId: OriginalsById): string | undefined {
 /**
  * What the model reads in place of a fold. The first line marks the synthetic
  * user message as archive content, not user text, and names the fold id in the
- * same `[#id]` form the tools print, so the model can address it without a map.
+ * same bare form the tools print, so the model can address it without a map.
  */
 export function foldSummaryText(fold: FoldItem): string {
   const body = fold.summary || `(no summary: ${originalIds([fold]).length} messages)`;
-  return `[#${fold.id}] archived fold summary:\n${body}`;
+  return `${fold.id} archived fold summary:\n${body}`;
 }
 
 export function rootTokens(item: Item, byId: OriginalsById): number {

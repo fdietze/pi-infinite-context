@@ -31,7 +31,7 @@ import {
 } from "./unapplied-folds.ts";
 import { planRootRanges } from "./plan-root-ranges.ts";
 import { serializeMessage } from "./serialize-message.ts";
-import { validateToolUnitOwnership } from "./tool-units.ts";
+import { unitsById, validateToolUnitOwnership } from "./tool-units.ts";
 import { FOLD_MIN_SHARE, nudgeSchedule, planNudge } from "./nudge.ts";
 import {
   DEFAULT_SETTINGS,
@@ -318,9 +318,10 @@ export default function infiniteContext(pi: ExtensionAPI) {
     name: "context_map",
     label: "Context map",
     description:
-      "List all ordered roots, or all direct children of one fold, in one response: " +
-      "`[#id] <role> ~<tokens> · <preview>` per message, `[#id] fold <N> msgs ~<tokens> · <summary preview>` per fold, " +
-      "`not live` instead of tokens when Pi omits it from context. Previews shrink when needed so every item is listed; it never recursively dumps a subtree.",
+      "List the ordered roots, or the direct children of one fold, in one response, a tool call with its results as one line: " +
+      "`<id> <role> <tokens> <preview>` per message, `<id> call <tokens> <preview>` per tool call with its results, " +
+      "`<id> fold <tokens> <summary preview>` per fold, where <tokens> is the approximate context cost, or `not live` when Pi omits it from context. " +
+      "The running tool call is not listed. Previews shrink when needed so every item is listed; it never recursively dumps a subtree.",
     parameters: Type.Object({
       id: Type.Optional(
         IdParam("Fold id whose direct children to list. Omit for the roots."),
@@ -331,7 +332,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
       const state = current(ctx);
       const id = params.id === undefined ? undefined : bareId(params.id);
       const listing = directItems(state.roots, id);
-      const map = renderMap(listing.label, listing.items, state.byId);
+      const map = renderMap(listing.label, listing.items, state.byId, unitsById(state.originals));
       return {
         content: [{ type: "text", text: map.text }],
         details: {
@@ -347,7 +348,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
     name: "context_peek",
     label: "Context peek",
     description:
-      `Read one original message's serialized text or exactly one fold's summary without changing context. ` +
+      `Read one original message's serialized text (a call id reads the call with its results) or exactly one fold's summary without changing context. ` +
       `Uses 1-based line windows (default ${DEFAULT_PAGE_LIMIT}); every result reports total item lines. The item is returned whole — it already fit in context once — so page with offset/limit to bound what you pull back.`,
     parameters: Type.Object({
       id: IdParam(
@@ -362,18 +363,29 @@ export default function infiniteContext(pi: ExtensionAPI) {
       const item = findItem(state.roots, id);
       if (!item) throw unknownIdError(id);
       const page = parsePage(params.offset, params.limit);
+      // A call id reads the whole tool unit, because context_map lists a call and its results as one line.
+      const members =
+        item.kind === "message" ? unitsById(state.originals).members.get(id) : undefined;
       const text =
         item.kind === "fold"
           ? item.summary
-          : serializeMessage(state.byId.get(item.id)!.message);
+          : (members ?? [id])
+              .map((member, i) => {
+                const message = state.byId.get(member)!.message;
+                const body = serializeMessage(message);
+                return i === 0 ? body : `(result ${message.role === "toolResult" ? message.toolName : member})\n${body}`;
+              })
+              .join("\n");
       const window = lineWindow(text, page.offset, page.limit);
       const kind =
         item.kind === "fold"
           ? "fold summary"
-          : state.byId.get(item.id)!.message.role;
+          : members
+            ? "call"
+            : state.byId.get(item.id)!.message.role;
       const range =
         window.end >= window.start ? `${window.start}-${window.end}` : "none";
-      const footer = `[#${id}] ${kind} · lines ${range} of ${window.totalLines}`;
+      const footer = `${id} ${kind} · lines ${range} of ${window.totalLines}`;
       // No boundOutput here: peek deliberately returns one already-context-sized item in full.
       return {
         content: [
@@ -438,7 +450,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
         ];
         for (const hit of result.hits) {
           lines.push(
-            `[#${hit.id}] ${hit.role}${hit.parentFoldId ? ` · child of [#${hit.parentFoldId}]` : " · root"}`,
+            `${hit.id} ${hit.role}${hit.parentFoldId ? ` · child of ${hit.parentFoldId}` : " · root"}`,
             ...hit.matches.map((match) => `${match.line}: ${match.text}`),
           );
           if (hit.omittedMatches)
@@ -527,7 +539,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
         content: [
           {
             type: "text",
-            text: `Created ${ids.length} fold${ids.length === 1 ? "" : "s"}: ${ids.map((id) => `[#${id}]`).join(", ")} · ${effect}`,
+            text: `Created ${ids.length} fold${ids.length === 1 ? "" : "s"}: ${ids.join(", ")} · ${effect}`,
           },
         ],
         details: { ids, deltaTokens: delta },

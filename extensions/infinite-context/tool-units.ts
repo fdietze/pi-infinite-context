@@ -73,6 +73,29 @@ export function unitMembers(units: ToolUnits, owner: number): number[] {
   return members;
 }
 
+export interface UnitsById {
+  /** Owner id (the assistant with the calls) -> ids of its live members, owner first; only units with results. */
+  readonly members: ReadonlyMap<string, readonly string[]>;
+  /** Ids of the running unit, which no fold may include. */
+  readonly pending: ReadonlySet<string>;
+}
+
+/** toolUnits() keyed by original id, for tools that show or read a unit as one item. */
+export function unitsById(originals: readonly OriginalMessage[]): UnitsById {
+  const units = toolUnits(originals);
+  const members = new Map<string, string[]>();
+  for (let owner = 0; owner < originals.length; ++owner) {
+    if (units.start[owner] !== owner || units.end[owner] === owner) continue;
+    members.set(originals[owner].id, unitMembers(units, owner).map((i) => originals[i].id));
+  }
+  const pending = new Set<string>();
+  if (units.pendingOwner !== undefined) {
+    const owner = originals[units.pendingOwner].id;
+    for (const id of members.get(owner) ?? [owner]) pending.add(id);
+  }
+  return { members, pending };
+}
+
 /** Reject persisted states that would project a tool call without its results. */
 export function validateToolUnitOwnership(
   roots: Forest,

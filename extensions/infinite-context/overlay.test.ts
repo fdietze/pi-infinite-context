@@ -28,7 +28,7 @@ test("overlay preserves live object identity and drops folded members", () => {
   const output = buildOverlay(request, positionsOf(originals), originals, roots);
   assert.equal(output[0], request[0]);
   assert.equal(output.length, 3);
-  assert.equal(output[1].role === "user" && output[1].content, "[#fold-x] archived fold summary:\nfiles read");
+  assert.equal(output[1].role === "user" && output[1].content, "fold-x archived fold summary:\nfiles read");
   assert.equal(output[2], request[4]);
   assert.ok(output.every((message) => message.role !== "toolResult"));
 });
@@ -45,7 +45,7 @@ test("a fold is projected at its anchor, the first live member", () => {
   const request = live(originals);
   const output = buildOverlay(request, positionsOf(originals), originals, roots);
   assert.equal(output.length, 2);
-  assert.equal(output[0].role === "user" && output[0].content, "[#fold-a] archived fold summary:\narchived");
+  assert.equal(output[0].role === "user" && output[0].content, "fold-a archived fold summary:\narchived");
   assert.equal(output[0].timestamp, request[0].timestamp);
   assert.equal(output[1], request[1]);
 });
@@ -74,7 +74,7 @@ test("a folded custom message is projected from its entry id, not its timestamp"
     originals,
     roots,
   );
-  assert.equal(output[0].role === "user" && output[0].content, "[#fold-custom] archived fold summary:\narchived notice");
+  assert.equal(output[0].role === "user" && output[0].content, "fold-custom archived fold summary:\narchived notice");
 });
 
 test("messages appended after the projection pass through unchanged", () => {
@@ -128,7 +128,7 @@ test("a message inserted after a folded position is dropped with the fold", () =
   const output = buildOverlay(request, positionsOf(originals), originals, roots);
   assert.equal(output.length, 3);
   assert.equal(output[0], request[0]);
-  assert.equal(output[1].role === "user" && output[1].content, "[#fold-q] archived fold summary:\nasked, then dropped it");
+  assert.equal(output[1].role === "user" && output[1].content, "fold-q archived fold summary:\nasked, then dropped it");
   assert.equal(output[2], request[4]);
 });
 
@@ -141,7 +141,7 @@ test("a message inserted before the first position passes through", () => {
   const request = [preamble, ...live(originals)];
   const output = buildOverlay(request, positionsOf(originals), originals, roots);
   assert.equal(output[0], preamble);
-  assert.equal(output[1].role === "user" && output[1].content, "[#fold-head] archived fold summary:\nhead");
+  assert.equal(output[1].role === "user" && output[1].content, "fold-head archived fold summary:\nhead");
   assert.deepEqual(output.slice(2), request.slice(3));
 });
 
@@ -170,6 +170,6 @@ test("an empty-summary fold projects an id-marked placeholder", () => {
   assert.equal(output.length, 1);
   assert.equal(
     output[0].role === "user" && output[0].content,
-    "[#fold-empty] archived fold summary:\n(no summary: 2 messages)",
+    "fold-empty archived fold summary:\n(no summary: 2 messages)",
   );
 });

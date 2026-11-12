@@ -9,7 +9,7 @@ import {
   toolResultMessage,
   userMessage,
 } from "./pi-test-fixtures.ts";
-import { toolUnits, unitMembers, validateToolUnitOwnership } from "./tool-units.ts";
+import { toolUnits, unitMembers, unitsById, validateToolUnitOwnership } from "./tool-units.ts";
 
 const call = (id: string) => ({ type: "toolCall" as const, id, name: "read", arguments: {} });
 
@@ -85,4 +85,11 @@ test("an omitted original between a call and its result belongs to no unit", () 
     { first: 1, last: 1, id: "fold-edited", summary: "" },
   ]);
   assert.doesNotThrow(() => validateToolUnitOwnership(roots, originals));
+});
+
+test("units by id name each call's members and the running unit", () => {
+  const units = unitsById(completedTools());
+  assert.deepEqual([...units.members], [["a1", ["a1", "r2", "r3"]]]);
+  assert.deepEqual([...units.pending], []);
+  assert.deepEqual([...unitsById(completedTools().slice(0, 3)).pending], ["a1", "r2"]);
 });
