@@ -6,7 +6,7 @@ import { toolUnits } from "./tool-units.ts";
 
 export interface RootRangeRequest {
   readonly from: string;
-  readonly to?: string;
+  readonly to: string;
   readonly summary: string;
 }
 
@@ -41,9 +41,9 @@ export function planRootRanges(
 
   const planned = requests.map((request, item) => {
     const a = rootIndex.get(request.from);
-    const b = rootIndex.get(request.to ?? request.from);
+    const b = rootIndex.get(request.to);
     if (a === undefined) throw notARootError(roots, request.from);
-    if (b === undefined) throw notARootError(roots, request.to ?? request.from);
+    if (b === undefined) throw notARootError(roots, request.to);
     let first = Math.min(a, b);
     let last = Math.max(a, b);
     let changed = true;

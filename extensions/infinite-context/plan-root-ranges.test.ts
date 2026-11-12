@@ -16,7 +16,7 @@ const call = (id: string) => ({ type: "toolCall" as const, id, name: "read", arg
 test("fold range expands to a whole tool unit", () => {
   const originals = completedTools();
   const roots = originals.map(({ id }) => messageItem(id));
-  assert.deepEqual(planRootRanges(roots, originals, [{ from: "r2", summary: "read" }]), [
+  assert.deepEqual(planRootRanges(roots, originals, [{ from: "r2", to: "r2", summary: "read" }]), [
     { first: 1, last: 3, summary: "read" },
   ]);
 });
@@ -25,7 +25,7 @@ test("the pending unit of the running turn is rejected by name", () => {
   const originals = completedTools().slice(0, 2);
   const roots = originals.map(({ id }) => messageItem(id));
   assert.throws(
-    () => planRootRanges(roots, originals, [{ from: "a1", summary: "" }]),
+    () => planRootRanges(roots, originals, [{ from: "a1", to: "a1", summary: "" }]),
     /Item 1 covers root "a1", the pending tool call/,
   );
 });
@@ -34,7 +34,7 @@ test("a partial parallel result batch cannot be folded through a known result", 
   const originals = completedTools().slice(0, 3);
   const roots = originals.map(({ id }) => messageItem(id));
   assert.throws(
-    () => planRootRanges(roots, originals, [{ from: "r2", summary: "" }]),
+    () => planRootRanges(roots, originals, [{ from: "r2", to: "r2", summary: "" }]),
     /pending tool call/,
   );
 });
@@ -59,11 +59,11 @@ test("unknown and non-root endpoints name the id and the way out", () => {
     [{ first: 1, last: 3, id: "fold-a", summary: "read" }],
   );
   assert.throws(
-    () => planRootRanges(roots, originals, [{ from: "nope", summary: "" }]),
+    () => planRootRanges(roots, originals, [{ from: "nope", to: "nope", summary: "" }]),
     /"nope" is not a root\. Call context_map/,
   );
   assert.throws(
-    () => planRootRanges(roots, originals, [{ from: "r2", summary: "" }]),
+    () => planRootRanges(roots, originals, [{ from: "r2", to: "r2", summary: "" }]),
     /"r2" is not a root: it is inside fold "fold-a"\. Fold "fold-a" instead\./,
   );
 });
@@ -100,7 +100,7 @@ test("folding an omitted original does not swallow the surrounding tool unit", (
     original("a2", assistantMessage([{ type: "text", text: "next" }], 4)),
   ];
   const roots = originals.map(({ id }) => messageItem(id));
-  assert.deepEqual(planRootRanges(roots, originals, [{ from: "edited", summary: "" }]), [
+  assert.deepEqual(planRootRanges(roots, originals, [{ from: "edited", to: "edited", summary: "" }]), [
     { first: 1, last: 1, summary: "" },
   ]);
 });

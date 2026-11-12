@@ -256,11 +256,11 @@ test("from-only refolding revises active context and keeps readable, searchable 
   };
   const saved = () => (h.entries().at(-1) as Extract<SessionEntry, { type: "custom" }>).data as Snapshot;
 
-  const innerId = await fold({ items: [{ from: "u1", summary: "inner history" }] });
+  const innerId = await fold({ items: [{ from: "u1", to: "u1", summary: "inner history" }] });
   const oldId = await fold({ items: [{ from: innerId, to: "u2", summary: "previous history" }] });
   const previous = saved().roots[0];
   const before = structuredClone(previous);
-  const newId = await fold({ items: [{ from: oldId, summary: "current state" }] });
+  const newId = await fold({ items: [{ from: oldId, to: oldId, summary: "current state" }] });
   assert.notEqual(newId, oldId);
   assert.notEqual(newId, innerId);
   const revised = saved().roots[0];
@@ -327,7 +327,7 @@ test("folding only excluded bash reports the actual zero provider-context delta"
   await h.emit("session_start");
   const result = await h.tools.get("context_fold")!.execute(
     "call",
-    { items: [{ from: "bash", summary: "excluded" }] },
+    { items: [{ from: "bash", to: "bash", summary: "excluded" }] },
     undefined,
     undefined,
     h.ctx,
@@ -362,10 +362,12 @@ test("maximal tool arguments pass Pi's own schema validation", () => {
   assert.deepEqual(validate("context_fold", maximalFold), maximalFold);
   // Invalid arguments are rejected by Pi with its own actionable schema error.
   assert.throws(
-    () => validate("context_fold", { items: [{ from: "fold", summary: "x".repeat(12_001) }] }),
+    () => validate("context_fold", { items: [{ from: "fold", to: "fold", summary: "x".repeat(12_001) }] }),
     /must not have more than 12000 characters/,
   );
   assert.throws(() => validate("context_fold", { items: [{ summary: "no from id" }] }), /from/);
+  // A missing end id would silently fold a single root; the caller states the range.
+  assert.throws(() => validate("context_fold", { items: [{ from: "u1", summary: "x" }] }), /to/);
 });
 
 test("reload rejects a split tool unit and accepts a folded abandoned call", async () => {
@@ -470,7 +472,7 @@ test("id errors name the id and the next step", async () => {
   await assert.rejects(call("context_map", { id: "nope" }), /"nope" is not in the archive/);
   await assert.rejects(call("context_map", { id: "u1" }), /"u1" is a message, not a fold/);
   await assert.rejects(
-    call("context_fold", { items: [{ from: "u1", summary: "x" }] }),
+    call("context_fold", { items: [{ from: "u1", to: "u1", summary: "x" }] }),
     /"u1" is not a root: it is inside fold "/,
   );
   await assert.rejects(

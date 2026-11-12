@@ -462,7 +462,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
     name: "context_fold",
     label: "Context fold",
     description:
-      "Wrap contiguous root ranges in new folds. Each explicit summary is the new fold's projection; existing folds become children unchanged. Refold a single root fold to revise its active summary while preserving history. The batch is all-or-nothing and tool calls/results remain indivisible.",
+      "Wrap contiguous root ranges in new folds. Each explicit summary is the new fold's projection; existing folds become children unchanged. To revise a fold's summary, fold it alone (from = to = its id); the old summary stays in history. The batch is all-or-nothing and tool calls/results remain indivisible.",
     promptSnippet:
       "Fold context that later work no longer needs into a searchable archive",
     promptGuidelines: [
@@ -475,7 +475,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
       items: Type.Array(
         Type.Object({
           from: IdParam("First root id."),
-          to: Type.Optional(IdParam("Inclusive root id; defaults to from.")),
+          to: IdParam("Last root id, inclusive; equal to from for a single root."),
           summary: SummaryParam(
             "Exact new fold summary; an empty string is allowed.",
           ),
@@ -492,7 +492,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
       const state = current(ctx);
       const requests = params.items.map((item) => ({
         from: bareId(item.from),
-        to: item.to === undefined ? undefined : bareId(item.to),
+        to: bareId(item.to),
         summary: item.summary,
       }));
       const planned = planRootRanges(state.roots, state.originals, requests);

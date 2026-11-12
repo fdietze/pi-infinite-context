@@ -114,7 +114,7 @@ export default function scriptedProvider(pi: any) {
           const result = context.messages.findLast((message: any) =>
             message.role === "toolResult" && message.toolName === "context_fold");
           call("context_fold", {
-            items: [{ from: result.details.ids[0], summary: REVISED_SUMMARY }],
+            items: [{ from: result.details.ids[0], to: result.details.ids[0], summary: REVISED_SUMMARY }],
           });
         }
         message.stopReason = message.content.some((block: any) => block.type === "toolCall")

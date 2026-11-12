@@ -270,7 +270,7 @@ test("folding a real session keeps the archive and the request consistent", () =
           } catch (error) {
             assertActionable(
               (error as Error).message,
-              requests.flatMap((request) => [request.from, request.to!]),
+              requests.flatMap((request) => [request.from, request.to]),
               requests.length,
             );
             // Keep building folds: retry the same start clipped before the pending unit.
