@@ -634,3 +634,15 @@ test("a branch that fails the checks at request time stops with folds in memory 
   await assert.rejects(plain.emit("context", requestOf(plainSource)), /native compaction/);
   assert.equal(plain.aborts(), 0);
 });
+
+test("context_search leaves out the running call, whose own arguments contain the pattern", async () => {
+  const running = harness([
+    entry("u1", "user", "needle", 1),
+    entry("a2", "assistant", [
+      { type: "toolCall", id: "search", name: "context_search", arguments: { patterns: ["needle"] } },
+    ], 2),
+  ]);
+  await running.emit("session_start");
+  const search = await running.tools.get("context_search")!.execute("search", { patterns: ["needle"] }, undefined, undefined, running.ctx);
+  assert.equal(search.content[0].text, "1 matching lines in 1 items for /needle/:\nu1 user · root\n1: needle");
+});

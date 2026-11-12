@@ -443,6 +443,10 @@ export default function infiniteContext(pi: ExtensionAPI) {
     executionMode: "sequential",
     async execute(_callId, params, _signal, _update, ctx) {
       const state = current(ctx);
+      // The running call is left out because its own arguments contain every pattern, so it would
+      // match every search; context_map leaves it out too.
+      const { pending } = unitsById(state.originals);
+      const originals = state.originals.filter((original) => !pending.has(original.id));
       const groups = params.patterns.map((source, index) => {
         let pattern: RegExp;
         try {
@@ -454,7 +458,7 @@ export default function infiniteContext(pi: ExtensionAPI) {
         }
         return {
           source,
-          result: searchArchive(state.originals, state.roots, pattern),
+          result: searchArchive(originals, state.roots, pattern),
         };
       });
       const rendered = groups.map(({ source, result }) => {
