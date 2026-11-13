@@ -337,14 +337,19 @@ export default function infiniteContext(pi: ExtensionAPI) {
       "`<id> fold <tokens> <summary preview>` per fold, where <tokens> is the approximate context cost, or `not live` when Pi omits it from context. " +
       "The running tool call is not listed. Previews shrink when needed so every item is listed; it never recursively dumps a subtree.",
     parameters: Type.Object({
+      // An empty id also lists the roots: weaker models fill optional string parameters with "",
+      // and a validation error at the first map call can end their folding for the session.
       id: Type.Optional(
-        IdParam("Fold id whose direct children to list. Omit for the roots."),
+        Type.String({
+          description: "Fold id whose direct children to list. Omit it or pass an empty string for the roots.",
+          maxLength: MAX_ID_LENGTH,
+        }),
       ),
     }),
     executionMode: "sequential",
     async execute(_callId, params, _signal, _update, ctx) {
       const state = current(ctx);
-      const id = params.id === undefined ? undefined : bareId(params.id);
+      const id = params.id ? bareId(params.id) : undefined;
       const listing = directItems(state.roots, id);
       const map = renderMap(listing.label, listing.items, state.byId, unitsById(state.originals));
       return {

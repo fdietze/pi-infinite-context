@@ -288,6 +288,8 @@ test("fold persists v2, overlays one summary, and reloads its own snapshot", asy
   const map = await h.tools.get("context_map")!.execute("map", {}, undefined, undefined, h.ctx);
   assert.match(map.content[0].text, /fold-/);
   assert.match(map.content[0].text, /both/);
+  const emptyIdMap = await h.tools.get("context_map")!.execute("map", { id: "" }, undefined, undefined, h.ctx);
+  assert.equal(emptyIdMap.content[0].text, map.content[0].text);
 });
 
 test("from-only refolding revises active context and keeps readable, searchable summary history", async () => {
@@ -394,6 +396,7 @@ test("maximal tool arguments pass Pi's own schema validation", () => {
   };
 
   assert.deepEqual(validate("context_map", {}), {});
+  assert.deepEqual(validate("context_map", { id: "" }), { id: "" });
   assert.deepEqual(validate("context_search", { patterns: ["needle"] }), {
     patterns: ["needle"],
   });
