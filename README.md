@@ -21,9 +21,9 @@ A **fold** groups messages under a summary. The model sees the summary instead o
 | Tool | What it does |
 | --- | --- |
 | `context_fold` | Groups consecutive messages or folds under a new summary. |
-| `context_map` | Lists top-level messages and folds, or the direct contents of one fold. |
+| `context_map` | Lists top-level messages, tool calls and folds, or the direct contents of one fold. A tool call and its results are one line. |
 | `context_search` | Searches original messages and fold summaries using regular expressions. |
-| `context_peek` | Reads one original message or fold summary by ID, with an optional line range. |
+| `context_peek` | Reads one original message, tool call with its results, or fold summary by ID, with an optional line range. |
 
 Map and search results provide the IDs to read next.
 
@@ -31,9 +31,9 @@ Map and search results provide the IDs to read next.
 
 From **150k tokens or 75% of the window** (whichever comes first), the extension reminds the agent to fold while it works with tools. The reminder says how many tokens a fold should free: about 35% of the context ([why](#when-a-fold-pays-off)), counted like the map counts them. If the agent does not fold, it reminds again after another 15k tokens. In practice it folds at the first reminder 77% of the time. Reminders never fold anything themselves.
 
-![Cost per prompt of 67 sessions, each with a random reminder limit between 100k and 300k tokens, in four bars of 50k. All bars are close to 1 and their whiskers overlap.](docs/reminder-limit.png)
+![Cost per prompt of 139 sessions, each with a random reminder limit between 100k and 300k tokens, in four bars of 50k. The two bars below 200k are about 0.9, the bars above rise to about 1.15.](docs/reminder-limit.png)
 
-Why 150k: in this experiment, each session got a random limit between 100k and 300k tokens. Each bar shows what the sessions with a limit in that band cost per prompt, where 1 is the average for their model. The whisker is the 90% interval. So far, no limit in this range is clearly cheaper: all bars are within a few percent of 1 and their whiskers overlap, but 12 session trees are too few to rule out a real difference. 150k keeps the context small without costing more in this data.
+Why 150k: in this experiment, each session got a random limit between 100k and 300k tokens. Each bar shows what the sessions with a limit in that band cost per prompt, where 1 is the average for their model. The whisker is the 90% interval. Limits below 200k cost about 10% less than average, 250–300k about 15% more. A likely reason: the bigger the context, the more a cache miss costs when the agent continues after a pause. 21 session trees are still few, so the real difference may be smaller. 150k sits in the cheaper range.
 
 Change the limits in `~/.pi/agent/infinite-context/settings.json` and restart Pi:
 
