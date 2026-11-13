@@ -2,12 +2,11 @@
 
 Use simple, accurate English and keep both documents very concise.
 
-- `README.md`: only a short purpose description, installation, the diagram with a short explanation below it, tools, context reminders, and measured prefix-cache behavior, in that order.
+- `README.md`: only a short purpose description, installation, the diagram with a short explanation below it, tools, context reminders, settings, and the measurements behind the defaults, in that order.
 - `DESIGN.md`: only vocabulary, data structure, algebra, and invariants. Check the model against the code.
 
 # Repository map
 
-- `README.md`: purpose, installation, folding diagram, tools, context reminders, and prefix caching.
 - `docs/publishing.md`: CI release semantics and one-time npm Trusted Publisher setup.
 - `.github/workflows/ci.yml`: checks and serialized OIDC publishing on pushes to `main`.
 - `scripts/publish.ts`: CI-only versioning, tarball integrity checks and release-tag selection.

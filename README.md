@@ -29,11 +29,11 @@ Map and search results provide the IDs to read next.
 
 ## Context reminders
 
-From **150k tokens or 75% of the window** (whichever comes first), the extension reminds the agent to fold while it works with tools. The reminder says how many tokens a fold should free: about 35% of the context ([why](#when-a-fold-pays-off)), counted like the map counts them. If the agent does not fold, it reminds again after another 15k tokens. In practice it folds at the first reminder 77% of the time. Reminders never fold anything themselves.
+From **150k tokens or 75% of the window** (whichever comes first), the extension reminds the agent to fold. The reminder says how much a fold should free: about 35% of the context. If the agent does not fold, it reminds again after another 15k tokens. Reminders never fold anything themselves.
 
-![Cost per prompt of 139 sessions, each with a random reminder limit between 100k and 300k tokens, in four bars of 50k. The two bars below 200k are about 0.9, the bars above rise to about 1.15.](docs/reminder-limit.png)
+Pi's own compaction, including `/compact`, is blocked. If the agent does not fold enough, the context can still overflow.
 
-Why 150k: in this experiment, each session got a random limit between 100k and 300k tokens. Each bar shows what the sessions with a limit in that band cost per prompt, where 1 is the average for their model. The whisker is the 90% interval. Limits below 200k cost about 10% less than average, 250–300k about 15% more. A likely reason: the bigger the context, the more a cache miss costs when the agent continues after a pause. 21 session trees are still few, so the real difference may be smaller. 150k sits in the cheaper range.
+## Settings
 
 Change the limits in `~/.pi/agent/infinite-context/settings.json` and restart Pi:
 
@@ -41,9 +41,7 @@ Change the limits in `~/.pi/agent/infinite-context/settings.json` and restart Pi
 { "nudgeAtTokens": 150000, "nudgeAtPercent": 75 }
 ```
 
-`nudgeAtTokens` can also be a range like `[100000, 300000]`. Each session then draws its own limit, which is how the experiment above works. Sessions record their limits and reminders, so tools like [context-efficiency](https://github.com/fdietze/context-efficiency) can analyze them.
-
-Models can have their own limits, keyed by exact `provider/id` like Pi's `compaction.modelOverrides`. Each field falls back to the top-level value, then to the default:
+Models can have their own limits, keyed by exact `provider/id`. Missing fields fall back to the top-level values:
 
 ```json
 {
@@ -52,14 +50,22 @@ Models can have their own limits, keyed by exact `provider/id` like Pi's `compac
 }
 ```
 
-Pi's own compaction, including `/compact`, is blocked. If the agent does not fold enough, the context can still overflow.
+`nudgeAtTokens` can also be a range like `[100000, 300000]`. Each session then gets a random limit from it. Sessions record their limits, so [context-efficiency](https://github.com/fdietze/context-efficiency) can compare them.
 
-## When a fold pays off
+## Why these defaults
 
-Providers cache the start of a prompt, and cached tokens cost about a tenth of uncached ones. A fold changes the prompt, so the next request is mostly uncached. Altogether, a fold costs about ten cached reads of the whole context. After that, every request reads fewer tokens. So a fold pays off when (share freed) × (requests until the next fold) is more than about 10.
+The charts come from the author's sessions with Claude and GPT models. They measure cost, not the quality of the agent's work.
+
+### Remind at 150k
+
+![Cost per prompt of 139 sessions, each with a random reminder limit between 100k and 300k tokens, in four ranges of 50k. The two points below 200k are about 0.9, the points above rise to about 1.15. Each point has a vertical line for its uncertainty.](docs/reminder-limit.png)
+
+Each session got a random limit between 100k and 300k tokens. Each dot shows what the sessions in that range cost per prompt, where 1 is the average; the line around it shows the uncertainty. Below 200k, sessions cost about 10% less. At 250–300k, they cost about 15% more, probably because a cache miss after a pause costs more when the context is big. The data is still small, but 150k sits in the cheaper range.
+
+### Free about 35% per fold
+
+Providers cache the start of a prompt, and cached tokens cost about a tenth. A fold changes the prompt, so the next request is mostly uncached. In total, a fold costs about ten cached reads of the whole context. After that, every request is cheaper.
 
 ![Dollars saved per dollar spent for each fold, against the share of context it freed, on a log scale. The line for all folds rises from about 0.2 below 20% freed, crosses 1 between 20% and 30%, and reaches about 14 at 70-80%.](docs/fold-payoff.png)
 
-Each dot is one fold. The further right, the more of the context it freed. The higher, the more dollars it saved per dollar it cost. The line shows all folds together, and above the dashed line a fold paid off. Folds that free less than 20% lose money. From 30%, folds pay off on average, because a few dozen requests usually follow. At 70–80%, they return about 14×. The chart measures what a fold frees after its own overhead: the map and the summary take about 5% of the context. So the reminder asks for about 35%.
-
-Both charts use the author's sessions with Claude and GPT models: the last 90 days for folds, and since 2026-10-26 for the limit experiment. They measure cost only, not the quality of the agent's work. They come from [context-efficiency](https://github.com/fdietze/context-efficiency).
+Each dot is one fold: how much of the context it freed, and how many dollars it saved per dollar it cost. Folds that free less than 20% lose money. From 30%, they pay off on average; at 70–80%, they return about 14×. The map and the summary take about 5% of the context, so the reminder asks for 35%.
