@@ -60,7 +60,10 @@ import {
 
 const MAX_ID_LENGTH = 128;
 const MAX_PATTERN_LENGTH = 4096;
-const MAX_SUMMARY_LENGTH = 12_000;
+// Bounds runaway arguments. Kept well above real summaries (p99 ~10.6k characters
+// across ~2,500 folds) because a rejected summary is already written and paid for,
+// and Pi echoes it back in the error, so a retry costs more than keeping it.
+const MAX_SUMMARY_LENGTH = 20_000;
 const bareId = (id: string) => id.replace(/^#/, "");
 const IdParam = (description: string) =>
   Type.String({ description, minLength: 1, maxLength: MAX_ID_LENGTH });

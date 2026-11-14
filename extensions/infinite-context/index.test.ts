@@ -412,14 +412,14 @@ test("maximal tool arguments pass Pi's own schema validation", () => {
     items: [{
       from: "f".repeat(128),
       to: "t".repeat(128),
-      summary: "s".repeat(12_000),
+      summary: "s".repeat(20_000),
     }],
   };
   assert.deepEqual(validate("context_fold", maximalFold), maximalFold);
   // Invalid arguments are rejected by Pi with its own actionable schema error.
   assert.throws(
-    () => validate("context_fold", { items: [{ from: "fold", to: "fold", summary: "x".repeat(12_001) }] }),
-    /must not have more than 12000 characters/,
+    () => validate("context_fold", { items: [{ from: "fold", to: "fold", summary: "x".repeat(20_001) }] }),
+    /must not have more than 20000 characters/,
   );
   assert.throws(() => validate("context_fold", { items: [{ summary: "no from id" }] }), /from/);
   // A missing end id would silently fold a single root; the caller states the range.
