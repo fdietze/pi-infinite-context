@@ -33,9 +33,11 @@ const BREAK_EVEN_TURNS = Math.round(FOLD_COST_READS / FOLD_MIN_SHARE / 10) * 10;
  * context. It states the break-even and the conclusion explicitly: weaker models given only the
  * cost per turn concluded that folding early costs more than it saves (Qwen 3.8 27b, 2026-11-13).
  * "As soon as that part reaches" also says what to do below the minimum: keep working.
+ * "Current root ids from context_map": without it, Qwen 3.8 27b guessed ids ("call:1") and reused
+ * ids it had folded already, then rewrote existing folds' summaries (2026-11-14).
  */
 export const foldRule = (minFreed: string): string =>
-  `Fold what the remaining work no longer needs verbatim, as soon as that part reaches ${minFreed}, in one context_fold call. ` +
+  `Fold what the remaining work no longer needs verbatim, as soon as that part reaches ${minFreed}, in one context_fold call on current root ids from context_map. ` +
   `Every kept token is paid again on every later turn, in money, time and reasoning quality, while a fold costs about ${FOLD_COST_READS} reads of the whole context: ` +
   `a fold that frees ${FOLD_MIN_SHARE * 100}% repays itself after about ${BREAK_EVEN_TURNS} turns, sooner when it frees more, and work usually continues longer. ` +
   "Wait only if the task ends before the fold repays itself.";

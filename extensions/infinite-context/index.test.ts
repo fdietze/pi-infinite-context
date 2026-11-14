@@ -234,7 +234,7 @@ test("a reminder names the fold size that pays off and skips the stale usage of 
 
   await turn("bash");
   assert.equal(h.sent.length, 1);
-  assert.match(h.sent[0], /~100k tokens in context as context_map counts them\. Fold what .* reaches ~35k of them, in one context_fold call\. .* after about 30 turns/);
+  assert.match(h.sent[0], /~100k tokens in context as context_map counts them\. Fold what .* reaches ~35k of them, in one context_fold call on current root ids from context_map\. .* after about 30 turns/);
   // 20% of the window: the room left is not named, so it cannot read as a reason to wait.
   assert.doesNotMatch(h.sent[0], /window/);
 
