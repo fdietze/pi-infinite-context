@@ -537,7 +537,7 @@ test("id errors name the id and the next step", async () => {
   await assert.rejects(call("context_map", { id: "u1" }), /"u1" is a message, not a fold/);
   await assert.rejects(
     call("context_fold", { items: [{ from: "u1", to: "u1", summary: "x" }] }),
-    /"u1" is not a root: it is inside fold "/,
+    /"u1" is already folded inside "fold-/,
   );
   await assert.rejects(
     call("context_search", { patterns: ["("] }),

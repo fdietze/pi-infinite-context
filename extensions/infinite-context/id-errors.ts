@@ -19,12 +19,16 @@ export function unknownIdError(id: string): Error {
 }
 
 /**
+ * An id inside a fold is usually a stale id whose content is already folded, so the error states
+ * that fact and points to a fresh map rather than to the fold: told to fold the containing fold,
+ * Qwen 3.8 27b refolded it alone and rewrote its summary, which frees nothing (2026-11-14).
+ * Folding an old fold together with new roots works from the fresh map, where it is a root.
  * An id that is neither a root nor archived is usually a miscopied id, so the
  * error says it does not exist rather than suggesting it exists elsewhere.
  */
 export function notARootError(roots: Forest, id: string): Error {
   const fold = containingFold(roots, id);
   if (fold)
-    return new Error(`"${id}" is not a root: it is inside fold "${fold.id}". Fold "${fold.id}" instead.`);
+    return new Error(`"${id}" is already folded inside "${fold.id}". Call context_map for the current roots.`);
   return unknownIdError(id);
 }

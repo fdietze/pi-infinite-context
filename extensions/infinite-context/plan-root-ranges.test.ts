@@ -64,7 +64,7 @@ test("unknown and non-root endpoints name the id and the way out", () => {
   );
   assert.throws(
     () => planRootRanges(roots, originals, [{ from: "r2", to: "r2", summary: "" }]),
-    /"r2" is not a root: it is inside fold "fold-a"\. Fold "fold-a" instead\./,
+    /"r2" is already folded inside "fold-a"\. Call context_map for the current roots\./,
   );
 });
 
