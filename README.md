@@ -29,7 +29,7 @@ Map and search results provide the IDs to read next.
 
 ## Context reminders
 
-From **150k tokens or 75% of the window** (whichever comes first), the extension reminds the agent to fold. The reminder says how much a fold should free: about 35% of the context. If the agent does not fold, it reminds again after another 15k tokens. Reminders never fold anything themselves.
+From **150k tokens or 75% of the window** (whichever comes first), the extension reminds the agent to fold. The reminder states the fold rule with the current numbers, such as how much a fold should free: about 35% of the context. From 75% of the window on, it also says how much room is left. If the agent does not fold, it reminds again after another 15k tokens. Reminders never fold anything themselves.
 
 Pi's own compaction, including `/compact`, is blocked. If the agent does not fold enough, the context can still overflow.
 

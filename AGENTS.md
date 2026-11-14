@@ -31,6 +31,7 @@ Use simple, accurate English and keep both documents very concise.
 - `extensions/infinite-context/unapplied-folds.ts`: detects saved folds after a failed load and words the notice when a request is stopped because they cannot be applied.
 - `extensions/infinite-context/search.ts`: pure archive regex search.
 - `extensions/infinite-context/output.ts`: line windows, token formatting, and global output limits.
+- `extensions/infinite-context/fold-rule.ts`: the fold rule (minimum share, when and what to fold, overflow) sent in both the context_fold guideline and the reminder.
 - `extensions/infinite-context/nudge.ts`: proactive folding threshold and reminder-step policy.
 - `extensions/infinite-context/settings.ts`: parser for `<agent dir>/infinite-context/settings.json` (nudge limits, per-model overrides), the per-branch limit (fixed or drawn from a range), and the session entry that records it.
 - `extensions/infinite-context/*.test.ts`: unit, property, and integration tests.

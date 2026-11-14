@@ -32,7 +32,8 @@ import {
 import { planRootRanges } from "./plan-root-ranges.ts";
 import { serializeMessage } from "./serialize-message.ts";
 import { unitsById, validateToolUnitOwnership } from "./tool-units.ts";
-import { FOLD_MIN_SHARE, nudgeSchedule, planNudge } from "./nudge.ts";
+import { FOLD_MIN_SHARE, foldRule, OVERFLOW_RULE } from "./fold-rule.ts";
+import { nudgeSchedule, planNudge } from "./nudge.ts";
 import {
   DEFAULT_SETTINGS,
   SETTINGS_ENTRY,
@@ -310,12 +311,15 @@ export default function infiniteContext(pi: ExtensionAPI) {
     pi.sendMessage(
       {
         customType: "infinite-context/nudge",
+        // The reminder states one token count, in the unit of the fold size. The room left in the
+        // window is named only from nudgeAtPercent on, where it matters (overflow): named earlier,
+        // weaker models took a small share of the window as a reason to delay folding.
         content:
-          // The decision rules live in the context_fold promptGuidelines below; the reminder only
-          // adds the current numbers, with the fold size derived from the same FOLD_MIN_SHARE (DRY).
-          `Context reminder: ~${fmtTokens(tokens)} tokens in context (${Math.round(percent)}% of the window, ~${fmtTokens(Math.max(0, window - tokens))} left), ~${fmtTokens(estimated)} as context_map counts them. ` +
-          `A fold pays off when one context_fold call frees ~${fmtTokens(Math.round(estimated * FOLD_MIN_SHARE))} of those or more. ` +
-          "Decide whether to fold now, following the instructions that mention context_fold.",
+          `Context reminder: ~${fmtTokens(estimated)} tokens in context as context_map counts them. ` +
+          foldRule(`~${fmtTokens(Math.round(estimated * FOLD_MIN_SHARE))} of them`) +
+          (percent >= settings.nudgeAtPercent
+            ? ` Only ~${fmtTokens(Math.max(0, window - tokens))} tokens are left in the window: ${OVERFLOW_RULE}`
+            : ""),
         display: true,
         details: {
           band: planned.band,
@@ -508,8 +512,8 @@ export default function infiniteContext(pi: ExtensionAPI) {
     promptSnippet:
       "Fold context that later work no longer needs into a searchable archive",
     promptGuidelines: [
-      `Use context_fold on roots that later work no longer needs, batched so one call frees ~${FOLD_MIN_SHARE * 100}% of the context or more: every kept token is re-read on every later turn, while a fold costs about ten re-reads of the whole context (the folding turns plus rewriting the cached prompt prefix), which smaller folds rarely repay. Delay a fold when there is a good reason, such as the task ending within a few turns.`,
-      "Keep the thread as roots: governing instructions, the active request, open decisions, unresolved errors, and material in active use. Native compaction is blocked and an overflow fails the turn, so when little room is left, use context_fold regardless, including parts of the thread: restate them in the summary; context_peek recovers details.",
+      foldRule(`~${FOLD_MIN_SHARE * 100}% of the tokens in context`),
+      `Keep the thread as roots: governing instructions, the active request, open decisions, unresolved errors, and material in active use. Native compaction is blocked and an overflow fails the turn, so when little room is left, ${OVERFLOW_RULE}`,
       "Write each context_fold summary so later work rarely needs the originals: results, decisions with their rationale, and open questions. Keep exact wording where later work depends on it or would search for it, such as file paths, identifiers, commands, error messages, quotes, and numbers. Use an empty summary only for disposable noise.",
       "Use context_map for root ids, context_search to locate archived text, and context_peek to read it.",
     ],
