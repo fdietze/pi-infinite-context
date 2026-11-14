@@ -15,17 +15,30 @@
  */
 export const FOLD_MIN_SHARE = 0.35;
 
+/** A fold's cost in reads of the whole context: its folding turns plus the cache rewrite it causes. */
+export const FOLD_COST_READS = 10;
+
+/**
+ * Turns after which a fold freeing FOLD_MIN_SHARE repays itself: each turn saves the freed share
+ * of one context read, so cost / share turns (10 / 0.35 ≈ 29, stated as 30).
+ * Work usually continues longer: 71% of 406 session files ran 30 or more requests after their
+ * first reminder, median 81 (90 days to 2026-11-14).
+ */
+const BREAK_EVEN_TURNS = Math.round(FOLD_COST_READS / FOLD_MIN_SHARE / 10) * 10;
+
 /**
  * When and what to fold, given the minimum fold size in the caller's unit.
  * The reason names money, time and reasoning quality because kept tokens cost all three: cloud
  * models bill them, local models compute over them, and every model reasons worse in a longer
- * context. It states the conclusion (fold early) explicitly: weaker models given only the cost
- * per turn concluded that folding early costs more than it saves (Qwen 3.8 27b, 2026-11-13).
+ * context. It states the break-even and the conclusion explicitly: weaker models given only the
+ * cost per turn concluded that folding early costs more than it saves (Qwen 3.8 27b, 2026-11-13).
+ * "As soon as that part reaches" also says what to do below the minimum: keep working.
  */
 export const foldRule = (minFreed: string): string =>
-  `Fold what the remaining work no longer needs verbatim, batched so one context_fold call frees ${minFreed} or more. ` +
-  "Every kept token is paid again on every later turn, in money, time and reasoning quality, while a fold costs about ten re-reads of the whole context; " +
-  "so a fold saves more the more turns remain. Keep what the remaining work uses; wait only if the task ends within a few turns.";
+  `Fold what the remaining work no longer needs verbatim, as soon as that part reaches ${minFreed}, in one context_fold call. ` +
+  `Every kept token is paid again on every later turn, in money, time and reasoning quality, while a fold costs about ${FOLD_COST_READS} reads of the whole context: ` +
+  `a fold that frees ${FOLD_MIN_SHARE * 100}% repays itself after about ${BREAK_EVEN_TURNS} turns, sooner when it frees more, and work usually continues longer. ` +
+  `Wait only if the task ends within about ${BREAK_EVEN_TURNS} turns.`;
 
 /** What to do when little room is left; native compaction is blocked, so overflow fails the turn. */
 export const OVERFLOW_RULE =

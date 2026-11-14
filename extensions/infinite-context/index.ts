@@ -311,14 +311,14 @@ export default function infiniteContext(pi: ExtensionAPI) {
     pi.sendMessage(
       {
         customType: "infinite-context/nudge",
-        // The reminder states one token count, in the unit of the fold size. The room left in the
-        // window is named only from nudgeAtPercent on, where it matters (overflow): named earlier,
-        // weaker models took a small share of the window as a reason to delay folding.
+        // The reminder states one token count, in the unit of the fold size. The window is named
+        // only from nudgeAtPercent on, where it matters (overflow), and as a share so it needs no
+        // unit: named earlier, weaker models took a small share as a reason to delay folding.
         content:
           `Context reminder: ~${fmtTokens(estimated)} tokens in context as context_map counts them. ` +
           foldRule(`~${fmtTokens(Math.round(estimated * FOLD_MIN_SHARE))} of them`) +
           (percent >= settings.nudgeAtPercent
-            ? ` Only ~${fmtTokens(Math.max(0, window - tokens))} tokens are left in the window: ${OVERFLOW_RULE}`
+            ? ` The window is ~${Math.round(percent)}% full: ${OVERFLOW_RULE}`
             : ""),
         display: true,
         details: {

@@ -234,15 +234,15 @@ test("a reminder names the fold size that pays off and skips the stale usage of 
 
   await turn("bash");
   assert.equal(h.sent.length, 1);
-  assert.match(h.sent[0], /~100k tokens in context as context_map counts them\. Fold what .* frees ~35k of them or more\./);
+  assert.match(h.sent[0], /~100k tokens in context as context_map counts them\. Fold what .* reaches ~35k of them, in one context_fold call\. .* after about 30 turns/);
   // 20% of the window: the room left is not named, so it cannot read as a reason to wait.
-  assert.doesNotMatch(h.sent[0], /left in the window/);
+  assert.doesNotMatch(h.sent[0], /window/);
 
   // From nudgeAtPercent (default 75%) on, the reminder names the room left and the overflow rule.
   h.setUsage({ contextWindow: 1_000_000, tokens: 800_000 });
   await turn("bash");
   assert.equal(h.sent.length, 2);
-  assert.match(h.sent[1], /Only ~200k tokens are left in the window: fold even if less is freed/);
+  assert.match(h.sent[1], /The window is ~80% full: fold even if less is freed/);
 });
 
 test("registers the approved four-tool surface in sequential mode", () => {
