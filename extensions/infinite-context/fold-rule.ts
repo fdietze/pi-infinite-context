@@ -38,7 +38,7 @@ export const foldRule = (minFreed: string): string =>
   `Fold what the remaining work no longer needs verbatim, as soon as that part reaches ${minFreed}, in one context_fold call. ` +
   `Every kept token is paid again on every later turn, in money, time and reasoning quality, while a fold costs about ${FOLD_COST_READS} reads of the whole context: ` +
   `a fold that frees ${FOLD_MIN_SHARE * 100}% repays itself after about ${BREAK_EVEN_TURNS} turns, sooner when it frees more, and work usually continues longer. ` +
-  `Wait only if the task ends within about ${BREAK_EVEN_TURNS} turns.`;
+  "Wait only if the task ends before the fold repays itself.";
 
 /** What to do when little room is left; native compaction is blocked, so overflow fails the turn. */
 export const OVERFLOW_RULE =
