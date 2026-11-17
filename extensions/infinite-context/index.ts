@@ -436,8 +436,8 @@ export default function infiniteContext(pi: ExtensionAPI) {
     label: "Context search",
     description:
       `Case-insensitive JavaScript regex search over every current-branch original and every reachable fold summary, once each. ` +
-      `Returns stable ids and 1-based lines. Each pattern emits at most ${SEARCH_MATCHES_PER_ITEM} lines per item and ${SEARCH_MATCHES_PER_PATTERN} lines overall.` +
-      `Use when the user seems to refer to something that you don't have in context, it might available be in folded history.`,
+      `Returns stable ids and 1-based lines. Each pattern emits at most ${SEARCH_MATCHES_PER_ITEM} lines per item and ${SEARCH_MATCHES_PER_PATTERN} lines overall. ` +
+      `Use when the user seems to refer to something that you don't have in context; it might be in folded history.`,
     parameters: Type.Object({
       patterns: Type.Array(
         Type.String({
